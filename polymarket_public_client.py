@@ -8,7 +8,7 @@ Only public GET endpoints are used. This module has no wallet/account logic.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
@@ -33,15 +33,34 @@ def parse_jsonish(value: Any) -> Any:
         return value
 
 
+def normalize_market_page(rows: Any) -> List[Dict[str, Any]]:
+    if isinstance(rows, list):
+        return [item for item in rows if isinstance(item, dict)]
+    if isinstance(rows, dict):
+        for key in ("markets", "data", "value", "results"):
+            value = rows.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
 def iter_gamma_markets(limit: int = 500, max_pages: int = 5) -> Iterable[Dict[str, Any]]:
-    for page in range(max_pages):
-        rows = get_json(GAMMA_MARKETS_URL, {"closed": "false", "active": "true", "limit": limit, "offset": page * limit})
-        markets = rows if isinstance(rows, list) else rows.get("markets", [])
+    """Yield active Gamma markets without skipping pages when Gamma caps page size.
+
+    Gamma may return fewer rows than the requested limit. Using page * limit can
+    skip markets when that happens, so advance offset by the actual number of
+    returned rows.
+    """
+    offset = 0
+    for _ in range(max_pages):
+        rows = get_json(GAMMA_MARKETS_URL, {"closed": "false", "active": "true", "limit": limit, "offset": offset})
+        markets = normalize_market_page(rows)
         if not markets:
             break
         for market in markets:
             yield market
-        if len(markets) < limit:
+        offset += len(markets)
+        if len(markets) < min(limit, 100):
             break
 
 
