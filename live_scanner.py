@@ -47,6 +47,9 @@ class Row:
     station_name: str
     station_source: str
     rule_warning: str
+    latitude: float
+    longitude: float
+    timezone: str
     target_date: str
     temp_type: str
     lower_f: Optional[float]
@@ -105,6 +108,9 @@ def make_row(market: ParsedWeatherMarket, config: Dict[str, Any], outcome: str, 
         station_name=market.station_name,
         station_source=market.station_source,
         rule_warning=market.rule_warning,
+        latitude=market.latitude,
+        longitude=market.longitude,
+        timezone=market.timezone,
         target_date=str(market.target_date),
         temp_type=market.temp_type,
         lower_f=market.lower_f,
