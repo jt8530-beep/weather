@@ -1,0 +1,40 @@
+{
+  "events": [
+    {
+      "id": "fixture-e1",
+      "slug": "nyc-temp-thresholds",
+      "title": "NYC temperature thresholds",
+      "negRisk": false,
+      "markets": [
+        {
+          "id": "fixture-low",
+          "slug": "nyc-high-temp-at-least-80",
+          "question": "Will NYC high temperature be at least 80F?",
+          "conditionId": "cond-low",
+          "enableOrderBook": true,
+          "active": true,
+          "closed": false,
+          "outcomes": "[\"Yes\",\"No\"]",
+          "clobTokenIds": "[\"YLOW\",\"NLOW\"]"
+        },
+        {
+          "id": "fixture-high",
+          "slug": "nyc-high-temp-at-least-85",
+          "question": "Will NYC high temperature be at least 85F?",
+          "conditionId": "cond-high",
+          "enableOrderBook": true,
+          "active": true,
+          "closed": false,
+          "outcomes": "[\"Yes\",\"No\"]",
+          "clobTokenIds": "[\"YHIGH\",\"NHIGH\"]"
+        }
+      ]
+    }
+  ],
+  "books": {
+    "YLOW": {"asset_id": "YLOW", "bids": [], "asks": [{"price": "0.47", "size": "25"}]},
+    "NLOW": {"asset_id": "NLOW", "bids": [], "asks": []},
+    "YHIGH": {"asset_id": "YHIGH", "bids": [], "asks": []},
+    "NHIGH": {"asset_id": "NHIGH", "bids": [], "asks": [{"price": "0.48", "size": "25"}]}
+  }
+}
