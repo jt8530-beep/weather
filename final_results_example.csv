@@ -1,0 +1,3 @@
+city,target_date,temp_type,final_temp_f,source,notes
+Seattle,2026-05-06,high,61,manual_placeholder,"replace with verified official station result"
+Austin,2026-05-06,high,99,manual_placeholder,"replace with verified official station result"
