@@ -5,6 +5,7 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
+from pm_weather_arb.market_classifier import classify_market
 from pm_weather_arb.near_miss import diagnose_near_misses, write_near_miss_csv
 from pm_weather_arb.types import BookLevel, Market, OrderBook, Token
 
@@ -48,6 +49,22 @@ class NearMissTests(unittest.TestCase):
         self.assertGreaterEqual(len(misses), 1)
         self.assertEqual(misses[0].kind, "YES_NO_BUY_BOTH")
         self.assertEqual(misses[0].edge_per_share, Decimal("-0.01"))
+        self.assertEqual(misses[0].market_class, "weather")
+        self.assertEqual(misses[0].strategy_scope, "universal")
+        self.assertFalse(misses[0].semantic_required)
+
+    def test_political_binary_stays_universal(self):
+        m = market("e1", "m1", "Will Trump and Putin meet next in Finland?", "Y1", "N1")
+        books = {
+            "Y1": book("Y1", bids=[("0.47", "50")], asks=[("0.51", "50")]),
+            "N1": book("N1", bids=[("0.47", "50")], asks=[("0.50", "50")]),
+        }
+        classification = classify_market(m)
+        _, misses = diagnose_near_misses([m], books, Decimal("0"), Decimal("5"), Decimal("20"), top_n=10)
+        self.assertEqual(classification.market_class, "politics")
+        self.assertTrue(misses)
+        self.assertEqual(misses[0].market_class, "politics")
+        self.assertEqual(misses[0].strategy_scope, "universal")
 
     def test_write_csv(self):
         m = market("e1", "m1", "Will NYC high temp be at least 80F?", "Y1", "N1")
@@ -59,7 +76,10 @@ class NearMissTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "near.csv"
             write_near_miss_csv(misses, path)
-            self.assertIn("YES_NO_BUY_BOTH", path.read_text())
+            text = path.read_text()
+            self.assertIn("market_class", text)
+            self.assertIn("strategy_scope", text)
+            self.assertIn("YES_NO_BUY_BOTH", text)
 
 
 if __name__ == "__main__":

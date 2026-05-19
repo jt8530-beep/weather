@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import csv
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from .market_classifier import (
+    classify_market,
+    classify_markets,
+    filter_threshold_markets,
+    semantic_required_for_kind,
+    strategy_scope_for_kind,
+)
 from .normalize import ThresholdSpec, extract_threshold_spec, implies
 from .orderbook import cumulative_candidate_sizes, quote_buy, quote_sell
 from .types import FillQuote, Market, OrderBook
@@ -27,10 +34,16 @@ class NearMiss:
     reason: str
     questions: str
     token_ids: str
+    market_class: str = "other"
+    strategy_scope: str = "universal"
+    semantic_required: bool = False
 
     def as_row(self) -> dict[str, str]:
         return {
             "kind": self.kind,
+            "market_class": self.market_class,
+            "strategy_scope": self.strategy_scope,
+            "semantic_required": str(self.semantic_required).lower(),
             "event_id": self.event_id,
             "event_title": self.event_title,
             "market_ids": self.market_ids,
@@ -54,28 +67,47 @@ class ScanDiagnostics:
     books_with_asks: int
     books_with_bids: int
     books_empty: int
+    binary_markets: int
     binary_checked: int
     binary_missing_books: int
     binary_empty_asks: int
     binary_empty_bids: int
+    numeric_threshold_markets: int
+    weather_threshold_markets: int
     threshold_specs: int
     threshold_pairs: int
     negrisk_groups: int
     negrisk_markets: int
+    class_weather: int
+    class_politics: int
+    class_sports: int
+    class_crypto: int
+    class_macro: int
+    class_other: int
+    class_mixed: int = 0
 
     def as_log_line(self) -> str:
         return (
-            f"diagnostics markets={self.markets_total} tokens={self.tokens_total} books={self.books_total} "
+            f"diagnostics raw_markets={self.markets_total} binary_markets={self.binary_markets} "
+            f"tokens={self.tokens_total} books={self.books_total} "
             f"books_with_asks={self.books_with_asks} books_with_bids={self.books_with_bids} books_empty={self.books_empty} "
-            f"binary_checked={self.binary_checked} binary_missing_books={self.binary_missing_books} "
+            f"universal_binary_checked={self.binary_checked} binary_missing_books={self.binary_missing_books} "
             f"binary_empty_asks={self.binary_empty_asks} binary_empty_bids={self.binary_empty_bids} "
+            f"numeric_threshold_markets={self.numeric_threshold_markets} "
+            f"weather_threshold_markets={self.weather_threshold_markets} "
             f"threshold_specs={self.threshold_specs} threshold_pairs={self.threshold_pairs} "
-            f"negrisk_groups={self.negrisk_groups} negrisk_markets={self.negrisk_markets}"
+            f"negrisk_groups={self.negrisk_groups} negrisk_markets={self.negrisk_markets} "
+            f"class_weather={self.class_weather} class_politics={self.class_politics} "
+            f"class_sports={self.class_sports} class_crypto={self.class_crypto} "
+            f"class_macro={self.class_macro} class_other={self.class_other} class_mixed={self.class_mixed}"
         )
 
 
 NEAR_MISS_FIELDNAMES = [
     "kind",
+    "market_class",
+    "strategy_scope",
+    "semantic_required",
     "event_id",
     "event_title",
     "market_ids",
@@ -186,6 +218,7 @@ def _near_yes_no(
 ) -> List[NearMiss]:
     misses: List[NearMiss] = []
     for market in markets:
+        market_class = classify_market(market).market_class
         yes = market.yes_token
         no = market.no_token
         if not yes or not no or yes.token_id not in books or no.token_id not in books:
@@ -212,6 +245,9 @@ def _near_yes_no(
                     reason=reason,
                     questions=market.question,
                     token_ids=f"{yes.token_id},{no.token_id}",
+                    market_class=market_class,
+                    strategy_scope=strategy_scope_for_kind("YES_NO_BUY_BOTH"),
+                    semantic_required=semantic_required_for_kind("YES_NO_BUY_BOTH"),
                 )
             )
 
@@ -234,6 +270,9 @@ def _near_yes_no(
                     reason=reason,
                     questions=market.question,
                     token_ids=f"{yes.token_id},{no.token_id}",
+                    market_class=market_class,
+                    strategy_scope=strategy_scope_for_kind("YES_NO_SPLIT_SELL_BOTH"),
+                    semantic_required=semantic_required_for_kind("YES_NO_SPLIT_SELL_BOTH"),
                 )
             )
     return misses
@@ -255,6 +294,7 @@ def _near_negrisk(
     for event_id, group in by_event.items():
         if len(group) < 2:
             continue
+        group_class = classify_markets(group)
         yes_markets = [m for m in group if m.yes_token and m.yes_token.token_id in books]
         if len(yes_markets) >= 2:
             yes_books = [books[m.yes_token.token_id] for m in yes_markets]  # type: ignore[union-attr]
@@ -277,6 +317,9 @@ def _near_negrisk(
                         reason=reason,
                         questions=_fmt_questions(yes_markets),
                         token_ids=",".join(m.yes_token.token_id for m in yes_markets if m.yes_token),
+                        market_class=group_class,
+                        strategy_scope=strategy_scope_for_kind("NEGRISK_BUY_ALL_YES"),
+                        semantic_required=semantic_required_for_kind("NEGRISK_BUY_ALL_YES"),
                     )
                 )
 
@@ -302,6 +345,9 @@ def _near_negrisk(
                         reason=reason,
                         questions=_fmt_questions(no_markets),
                         token_ids=",".join(m.no_token.token_id for m in no_markets if m.no_token),
+                        market_class=group_class,
+                        strategy_scope=strategy_scope_for_kind("NEGRISK_BUY_ALL_NO"),
+                        semantic_required=semantic_required_for_kind("NEGRISK_BUY_ALL_NO"),
                     )
                 )
     return misses
@@ -362,6 +408,9 @@ def _near_thresholds(
                 reason=reason,
                 questions=f"YES_SUPER: {m_superset.question} | NO_SUB: {m_subset.question}",
                 token_ids=f"{yes_super.token_id},{no_subset.token_id}",
+                market_class=classify_markets([m_subset, m_superset]),
+                strategy_scope=strategy_scope_for_kind("THRESHOLD_NESTED_BUY_SUPER_YES_SUB_NO"),
+                semantic_required=semantic_required_for_kind("THRESHOLD_NESTED_BUY_SUPER_YES_SUB_NO"),
             )
         )
     return misses
@@ -370,7 +419,10 @@ def _near_thresholds(
 def build_diagnostics(markets: Iterable[Market], books: Dict[str, OrderBook]) -> ScanDiagnostics:
     market_list = list(markets)
     token_ids = [token.token_id for market in market_list for token in market.tokens]
+    classifications = [classify_market(market) for market in market_list]
+    class_counts = Counter(item.market_class for item in classifications)
     binary_checked = 0
+    binary_markets = 0
     missing_books = 0
     empty_asks = 0
     empty_bids = 0
@@ -379,6 +431,7 @@ def build_diagnostics(markets: Iterable[Market], books: Dict[str, OrderBook]) ->
         no = market.no_token
         if not yes or not no:
             continue
+        binary_markets += 1
         if yes.token_id not in books or no.token_id not in books:
             missing_books += 1
             continue
@@ -388,7 +441,8 @@ def build_diagnostics(markets: Iterable[Market], books: Dict[str, OrderBook]) ->
         if not books[yes.token_id].bids or not books[no.token_id].bids:
             empty_bids += 1
 
-    specs, pairs = _threshold_pairs(market_list)
+    threshold_markets = filter_threshold_markets(market_list)
+    specs, pairs = _threshold_pairs(threshold_markets)
     negrisk_events: Dict[str, int] = defaultdict(int)
     negrisk_market_count = 0
     for market in market_list:
@@ -403,14 +457,24 @@ def build_diagnostics(markets: Iterable[Market], books: Dict[str, OrderBook]) ->
         books_with_asks=sum(1 for b in books.values() if b.asks),
         books_with_bids=sum(1 for b in books.values() if b.bids),
         books_empty=sum(1 for b in books.values() if not b.asks and not b.bids),
+        binary_markets=binary_markets,
         binary_checked=binary_checked,
         binary_missing_books=missing_books,
         binary_empty_asks=empty_asks,
         binary_empty_bids=empty_bids,
+        numeric_threshold_markets=sum(1 for item in classifications if item.has_numeric_threshold),
+        weather_threshold_markets=sum(1 for item in classifications if item.threshold_strategy_allowed),
         threshold_specs=len(specs),
         threshold_pairs=len(pairs),
         negrisk_groups=sum(1 for count in negrisk_events.values() if count >= 2),
         negrisk_markets=negrisk_market_count,
+        class_weather=class_counts["weather"],
+        class_politics=class_counts["politics"],
+        class_sports=class_counts["sports"],
+        class_crypto=class_counts["crypto"],
+        class_macro=class_counts["macro"],
+        class_other=class_counts["other"],
+        class_mixed=class_counts["mixed"],
     )
 
 
@@ -427,7 +491,7 @@ def diagnose_near_misses(
     misses: list[NearMiss] = []
     misses.extend(_near_yes_no(market_list, books, fee_rate, min_shares, max_shares))
     misses.extend(_near_negrisk(market_list, books, fee_rate, min_shares, max_shares))
-    misses.extend(_near_thresholds(market_list, books, fee_rate, min_shares, max_shares))
+    misses.extend(_near_thresholds(filter_threshold_markets(market_list), books, fee_rate, min_shares, max_shares))
     misses.sort(key=lambda m: (m.edge_per_share, m.expected_profit), reverse=True)
     return diagnostics, misses[:top_n]
 
@@ -449,11 +513,26 @@ def print_diagnostics(diagnostics: ScanDiagnostics, near_misses: Sequence[NearMi
             f"near_misses={len(near_misses)} closest_kind={closest.kind} "
             f"closest_edge={closest.edge_per_share} closest_profit={closest.expected_profit}"
         )
+        _print_closest("closest_universal", near_misses, lambda miss: miss.strategy_scope == "universal")
+        _print_closest("closest_semantic", near_misses, lambda miss: miss.strategy_scope == "semantic")
+        _print_closest("closest_weather", near_misses, lambda miss: miss.market_class == "weather")
         for idx, miss in enumerate(near_misses[:top_n], start=1):
             print(
                 f"NEAR_MISS #{idx} kind={miss.kind} edge={miss.edge_per_share} "
                 f"profit={miss.expected_profit} size={miss.size} reason={miss.reason} "
+                f"class={miss.market_class} scope={miss.strategy_scope} "
                 f"event={miss.event_title[:90]}"
             )
     else:
         print("near_misses=0 closest_edge=NA")
+
+
+def _print_closest(label: str, near_misses: Sequence[NearMiss], predicate) -> None:
+    miss = next((item for item in near_misses if predicate(item)), None)
+    if miss is None:
+        print(f"{label}_edge=NA")
+        return
+    print(
+        f"{label}_kind={miss.kind} {label}_edge={miss.edge_per_share} "
+        f"{label}_profit={miss.expected_profit} {label}_event={miss.event_title[:90]}"
+    )

@@ -4,11 +4,16 @@ set -euo pipefail
 SLEEP_SECONDS="${SLEEP_SECONDS:-3}"
 LOG_DIR="${LOG_DIR:-logs}"
 mkdir -p "$LOG_DIR" paper_logs
+WEATHER_SCOPE_ARGS=()
+if [[ "${PM_WEATHER_ONLY:-false}" == "true" ]]; then
+  WEATHER_SCOPE_ARGS+=(--weather-only)
+fi
 
 while true; do
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   echo "[$ts] paper_start"
   PYTHONPATH=src python -m pm_weather_arb paper \
+    "${WEATHER_SCOPE_ARGS[@]}" \
     --pages "${PM_PAGES:-5}" \
     --limit "${PM_LIMIT:-100}" \
     --max-shares "${PM_MAX_SHARES:-20}" \

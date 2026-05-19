@@ -50,9 +50,12 @@ def _load_markets_books(args: argparse.Namespace, config: Config) -> tuple[list[
     gamma = GammaClient(config)
     clob = ClobPublicClient(config)
     events = gamma.list_active_events(pages=args.pages, limit=args.limit, order=args.order)
-    markets = parse_markets_from_events(events, only_weatherish=not args.all_markets)
+    weather_only = bool(getattr(args, "weather_only", False)) and not bool(getattr(args, "all_markets", False))
+    markets = parse_markets_from_events(events, only_weatherish=weather_only)
     token_ids = _token_ids(markets)
-    print(f"events={len(events)} weather_markets={len(markets)} tokens={len(token_ids)}")
+    binary_markets = sum(1 for market in markets if market.yes_token and market.no_token)
+    scope = "weather" if weather_only else "all"
+    print(f"events={len(events)} raw_markets={len(markets)} binary_markets={binary_markets} tokens={len(token_ids)} market_scope={scope}")
     books = clob.get_books(token_ids, batch_size=args.book_batch_size) if token_ids else {}
     return markets, books
 
@@ -144,7 +147,8 @@ def _add_scan_args(scan: argparse.ArgumentParser) -> None:
     scan.add_argument("--output", default="opportunities.csv")
     scan.add_argument("--top", type=int, default=20)
     scan.add_argument("--fixture", help="load fixture JSON instead of live API")
-    scan.add_argument("--all-markets", action="store_true", help="disable weather keyword filter")
+    scan.add_argument("--all-markets", action="store_true", help="deprecated compatibility flag; all-market universal scanning is now the default")
+    scan.add_argument("--weather-only", action="store_true", help="restrict discovery to weather-like events for debugging")
     scan.add_argument("--diagnostics", action="store_true", help="print scanner diagnostics even if near-miss output is disabled")
     scan.add_argument("--near-miss-output", default="near_misses.csv", help="write closest non-arb candidates for debugging; use empty string to disable")
     scan.add_argument("--near-miss-top", type=int, default=50, help="number of near-misses to keep in CSV")

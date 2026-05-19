@@ -62,6 +62,18 @@ class ScannerTests(unittest.TestCase):
         opps = scan_all([low, high], books, Decimal("0"), Decimal("0.005"), Decimal("5"), Decimal("25"))
         self.assertIn("THRESHOLD_NESTED_BUY_SUPER_YES_SUB_NO", [o.kind for o in opps])
 
+    def test_threshold_nested_ignores_non_weather_semantics(self):
+        low = market("e2", "low", "Will Trump temperature be at least 80F?", "YLOW", "NLOW")
+        high = market("e2", "high", "Will Trump temperature be at least 85F?", "YHIGH", "NHIGH")
+        books = {
+            "YLOW": book("YLOW", asks=[("0.47", "25")]),
+            "NLOW": book("NLOW"),
+            "YHIGH": book("YHIGH"),
+            "NHIGH": book("NHIGH", asks=[("0.48", "25")]),
+        }
+        opps = scan_all([low, high], books, Decimal("0"), Decimal("0.005"), Decimal("5"), Decimal("25"))
+        self.assertNotIn("THRESHOLD_NESTED_BUY_SUPER_YES_SUB_NO", [o.kind for o in opps])
+
     def test_negrisk_buy_all_yes(self):
         m1 = market("e3", "m1", "Outcome A", "YA", "NA", neg=True)
         m2 = market("e3", "m2", "Outcome B", "YB", "NB", neg=True)

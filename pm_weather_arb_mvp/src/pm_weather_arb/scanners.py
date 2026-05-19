@@ -4,6 +4,7 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Dict, Iterable, List, Optional, Sequence
 
+from .market_classifier import filter_threshold_markets
 from .normalize import ThresholdSpec, extract_threshold_spec, implies
 from .orderbook import cumulative_candidate_sizes, quote_buy, quote_sell
 from .types import FillQuote, Leg, Market, Opportunity, OrderBook
@@ -293,6 +294,6 @@ def scan_all(
     opps: List[Opportunity] = []
     opps.extend(scan_yes_no_complement(market_list, books, fee_rate, min_edge, min_shares, max_shares))
     opps.extend(scan_neg_risk_full_sets(market_list, books, fee_rate, min_edge, min_shares, max_shares))
-    opps.extend(scan_threshold_nested(market_list, books, fee_rate, min_edge, min_shares, max_shares))
+    opps.extend(scan_threshold_nested(filter_threshold_markets(market_list), books, fee_rate, min_edge, min_shares, max_shares))
     opps.sort(key=lambda x: (x.edge_per_share, x.expected_profit), reverse=True)
     return opps
