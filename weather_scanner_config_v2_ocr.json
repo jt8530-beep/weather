@@ -1,0 +1,45 @@
+{
+  "limit_markets": 500,
+  "max_pages": 4,
+  "min_edge": 0.10,
+  "min_depth_usd": 25.0,
+  "max_spread": 0.15,
+  "paper_bankroll": 1000.0,
+  "max_trade_risk_pct": 0.01,
+  "fractional_kelly": 0.10,
+  "fixed_trade_usd": 10.0,
+  "base_sigma_f_high": 3.25,
+  "base_sigma_f_low": 3.75,
+  "sigma_per_day_f": 0.35,
+  "sleep_seconds": 300,
+  "out_dir": "paper_logs",
+  "city_bias_f": {
+    "seattle": 0.0,
+    "new york": 0.0,
+    "london": 0.0,
+    "austin": 0.0
+  },
+
+  "ocr_enabled": false,
+  "ocr_min_confidence": 70.0,
+  "ocr_max_abs_bias_f": 8.0,
+  "ocr_weight_today": 0.55,
+  "ocr_weight_tomorrow": 0.30,
+  "ocr_weight_later": 0.10,
+  "ocr_apply_to_low": false,
+  "ocr_out_dir": "paper_logs/ocr",
+  "ocr_headless": true,
+  "ocr_sources": [
+    {
+      "enabled": false,
+      "name": "example_austin_dashboard",
+      "city": "Austin",
+      "url": "https://example.com/weather-dashboard",
+      "selector": ".temperature-display-widget",
+      "unit": "F",
+      "timeout_ms": 20000,
+      "threshold": 170,
+      "scale": 3
+    }
+  ]
+}
