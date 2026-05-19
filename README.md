@@ -1,50 +1,68 @@
-# Polymarket Weather Paper Scanner V2 + OCR Bias
+# Polymarket Weather Live Scanner
 
-只读版天气市场 paper scanner。V2 增加了 OCR alternative data 模块，但仍然：
+这是一个只读 weather range scanner。它的目标是发现天气温度区间市场里的潜在 mispricing，并输出 paper candidates。
+
+安全边界：
 
 ```text
 不连接钱包
 不需要私钥
 不签名
 不下单
-只输出 paper signals
+只读取公开数据
+只输出 CSV
 ```
 
-## V2 新增内容
-
-- `alternative_data_ocr.py`
-  - 使用 Playwright 打开公开网页
-  - 对指定 CSS selector 截图
-  - 使用 Pillow 做灰度化、二值化、放大、锐化
-  - 使用 pytesseract 做本地 OCR
-  - 提取温度、置信度、截图路径、原始 OCR 文本
-
-- `weather_paper_scanner_v2.py`
-  - 读取 Polymarket 天气市场
-  - 读取 Open-Meteo daily forecast
-  - 可选读取 OCR 当前温度
-  - 用 `OCR 当前温度 - Open-Meteo 当前温度` 计算 bias
-  - 按距离结算日期给 forecast 做小权重修正
-  - 再计算每个 YES/NO 的 edge
-
-## 核心原则
-
-OCR 不直接触发交易。OCR 只允许做一件事：
+## 当前结构
 
 ```text
-forecast_adjusted = forecast_raw + ocr_bias * ocr_weight
+live_scanner.py                    实时只读扫描入口
+polymarket_public_client.py         公开市场与公开深度快照读取
+weather_market_parser.py            天气市场解析、城市/日期/温度区间识别
+forecast_tools.py                   Open-Meteo 预测与区间概率计算
+station_map.json                    城市到官方/近似观测站映射
+alternative_data_ocr.py             原始 OCR 模块
+alternative_data_ocr_ascii.py       ASCII 兼容 OCR 模块，推荐服务器使用
+paper_settlement_tracker.py         paper 结果回填工具
+weather_range_scanner_local.py      本地 CSV 快照研究版
+weather_scanner_config_v2_ocr.json  主配置文件
 ```
 
-默认权重：
+## 已修正的 6 个缺陷
 
-```text
-当天市场：0.55
-明天市场：0.30
-更远市场：0.10
-最低温市场：默认不使用 OCR 修正
+### 1. 不再只是本地快照
+
+新增 `live_scanner.py` 和 `polymarket_public_client.py`，可读取公开市场数据和公开深度快照。
+
+### 2. 增加实时市场发现与公开深度读取
+
+`polymarket_public_client.py` 负责读取 active markets，并按 token 读取公开 book stats。
+
+### 3. 增加 station mapping
+
+`station_map.json` 提供城市到观测站的初始映射。注意：这只是初始映射，实盘前必须逐个核对 Polymarket resolution rules，不能盲信默认机场。
+
+### 4. 增加 paper settlement 回填
+
+`paper_settlement_tracker.py` 可以把 scanner 输出和最终温度 CSV 合并，计算每 1 美元 paper unit 的胜负与 PnL。
+
+### 5. README 命名一致
+
+当前主入口是：
+
+```bash
+python live_scanner.py --config weather_scanner_config_v2_ocr.json --top 20
 ```
 
-如果 OCR 与 Open-Meteo 当前温度差异超过 `ocr_max_abs_bias_f`，默认 8°F，直接拒绝该 OCR 修正，避免识别错误。
+本地快照版是：
+
+```bash
+python weather_range_scanner_local.py --config weather_scanner_config_v2_ocr.json --snapshot market_snapshot_example.csv
+```
+
+### 6. OCR 兼容修正
+
+新增 `alternative_data_ocr_ascii.py`，不依赖 degree symbol，更适合服务器环境。
 
 ## 安装
 
@@ -53,112 +71,90 @@ Ubuntu/Debian：
 ```bash
 sudo apt-get update
 sudo apt-get install -y tesseract-ocr
-mkdir -p ~/weather_scanner_v2
-cd ~/weather_scanner_v2
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements_weather_scanner_v2_ocr.txt
 playwright install chromium
 ```
 
-Mac：
+## 运行 live scanner
+
+单次运行：
 
 ```bash
-brew install tesseract
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements_weather_scanner_v2_ocr.txt
-playwright install chromium
+python live_scanner.py --config weather_scanner_config_v2_ocr.json --top 20
 ```
 
-## 先不开 OCR，正常跑 scanner
-
-默认配置里 `ocr_enabled=false`，先确认基础 scanner 能跑：
+循环运行，每 5 分钟一次：
 
 ```bash
-python weather_paper_scanner_v2.py --config weather_scanner_config_v2_ocr.json --once --top 20
+python live_scanner.py --config weather_scanner_config_v2_ocr.json --loop --sleep 300 --top 20
 ```
 
-循环跑：
-
-```bash
-python weather_paper_scanner_v2.py --config weather_scanner_config_v2_ocr.json --loop --sleep 300 --top 20
-```
-
-## 单独测试 OCR
-
-先在配置里添加真实 URL 和 selector，并把该 source 的 `enabled` 改成 `true`。
-
-```json
-{
-  "enabled": true,
-  "name": "austin_public_dashboard",
-  "city": "Austin",
-  "url": "https://真实网页地址",
-  "selector": "真实CSS选择器",
-  "unit": "F"
-}
-```
-
-然后测试：
-
-```bash
-python alternative_data_ocr.py --config weather_scanner_config_v2_ocr.json
-```
-
-输出里重点看：
+输出：
 
 ```text
-ok
-confidence
-temp_f
-raw_text
-screenshot_path
+paper_logs/live_candidates.csv
 ```
 
-如果 `ok=false`，不要开主 scanner 的 OCR 修正。
+## OCR 测试
 
-## 开启 OCR 修正
+默认 OCR 关闭：
 
-确认 OCR 单独测试稳定后，再改配置：
+```json
+"ocr_enabled": false
+```
+
+单独测试 ASCII OCR：
+
+```bash
+python alternative_data_ocr_ascii.py --config weather_scanner_config_v2_ocr.json
+```
+
+测试稳定后，再把配置改成：
 
 ```json
 "ocr_enabled": true
 ```
 
-再运行：
-
-```bash
-python weather_paper_scanner_v2.py --config weather_scanner_config_v2_ocr.json --once --top 20
-```
-
-输出新增字段：
-
-- `forecast_raw_f`: Open-Meteo daily forecast + 固定城市 bias
-- `forecast_value_f`: OCR 修正后的 forecast
-- `ocr_temp_f`: OCR 当前温度
-- `public_current_f`: Open-Meteo 当前温度
-- `ocr_bias_f`: OCR 当前温度 - Open-Meteo 当前温度
-- `ocr_weight`: 实际应用权重
-
-## 目录输出
+OCR 只用于修正 forecast：
 
 ```text
-paper_logs/signals.csv       paper signal 记录
-paper_logs/ocr/*.png         OCR 原图和预处理图
+forecast_adjusted = forecast_raw + ocr_bias * ocr_weight
+```
+
+OCR 不直接决定 candidate。
+
+## Paper settlement 回填
+
+准备最终结果 CSV：
+
+```text
+city,target_date,temp_type,final_temp_f,source,notes
+Seattle,2026-05-06,high,61,official_station,verified manually
+```
+
+运行：
+
+```bash
+python paper_settlement_tracker.py \
+  --candidates paper_logs/live_candidates.csv \
+  --results final_results_example.csv \
+  --out paper_logs/settled_candidates.csv
 ```
 
 ## 实盘前硬规则
 
-这版仍然只用于 paper：
+这仍然不是自动交易程序。至少满足以下条件后，才考虑把信号接到任何执行系统：
 
 ```text
-至少跑满 30 天
-至少记录 300 个以上候选 outcome
-人工抽查 OCR 截图
-检查 Polymarket resolution rules
-统计 YES/NO 哪边 edge 兑现更好
+跑满 30 天
+累计 300+ candidates
+人工抽查 station mapping
+人工核对 resolution rules
+统计 YES/NO 或 IN_RANGE/OUT_RANGE 的兑现率
 确认利润不是集中在少数极端单
+确认 spread 和 depth 在真实可成交层面有效
 ```
 
-在这之前，不接私钥，不自动下单。
+一句话：先证明 edge 存在，再考虑执行。别让 bot 从研究员变成败家子。
