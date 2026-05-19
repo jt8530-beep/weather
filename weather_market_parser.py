@@ -7,6 +7,7 @@ Robustness goals:
 - Do not treat date fragments such as may-6-61 as a temperature bucket.
 - Prefer explicit Fahrenheit ranges, then the last plausible narrow range.
 - Accept 61-67F, 61-67°F, 61–67°F, 61 to 67 F, between 61 and 67.
+- Accept no-unit slug tails such as highest-temperature-in-seattle-on-may-6-61-67.
 - Support basic station map overrides by slug or market id.
 """
 
@@ -156,6 +157,11 @@ def _number_start_boundary() -> str:
     return r"(?<![A-Za-z0-9])"
 
 
+def _add_bucket_candidate(candidates: List[Tuple[int, int, float, float]], score: int, start: int, a: float, b: float) -> None:
+    if _valid_bucket(a, b):
+        candidates.append((score + start, start, min(a, b), max(a, b)))
+
+
 def parse_bucket_f(text: str) -> Tuple[Optional[float], Optional[float]]:
     """Parse a Fahrenheit temperature bucket.
 
@@ -175,10 +181,7 @@ def parse_bucket_f(text: str) -> Tuple[Optional[float], Optional[float]]:
         re.I,
     )
     for m in explicit_pat.finditer(t):
-        a, b = float(m.group(1)), float(m.group(2))
-        if _valid_bucket(a, b):
-            # Explicit unit plus later position wins. This targets slug tails like 61-67f.
-            candidates.append((100000 + m.start(), m.start(), min(a, b), max(a, b)))
+        _add_bucket_candidate(candidates, 100000, m.start(), float(m.group(1)), float(m.group(2)))
 
     between_pat = re.compile(
         r"between\s+(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:[Ff]|fahrenheit))?\s+and\s+"
@@ -186,21 +189,19 @@ def parse_bucket_f(text: str) -> Tuple[Optional[float], Optional[float]]:
         re.I,
     )
     for m in between_pat.finditer(t):
-        a, b = float(m.group(1)), float(m.group(2))
-        if _valid_bucket(a, b):
-            candidates.append((80000 + m.start(), m.start(), min(a, b), max(a, b)))
+        _add_bucket_candidate(candidates, 80000, m.start(), float(m.group(1)), float(m.group(2)))
 
+    # Overlap-aware fallback. In `may-6-61-67`, a normal finditer sees `6-61`
+    # first and then misses the overlapping `61-67`. The lookahead form checks
+    # every start position and lets ranking choose the later plausible bucket.
     no_unit_pat = re.compile(
         boundary
-        + r"(-?\d{1,3}(?:\.\d+)?)\s*(?:-|to|through)\s*"
-        + r"(-?\d{1,3}(?:\.\d+)?)(?!\d)",
+        + r"(?=(-?\d{1,3}(?:\.\d+)?)\s*(?:-|to|through)\s*"
+        + r"(-?\d{1,3}(?:\.\d+)?)(?!\d))",
         re.I,
     )
     for m in no_unit_pat.finditer(t):
-        a, b = float(m.group(1)), float(m.group(2))
-        if _valid_bucket(a, b):
-            # Only a fallback. Still prefer the last plausible range, not the first.
-            candidates.append((10000 + m.start(), m.start(), min(a, b), max(a, b)))
+        _add_bucket_candidate(candidates, 10000, m.start(), float(m.group(1)), float(m.group(2)))
 
     if candidates:
         candidates.sort(key=lambda x: x[0], reverse=True)
