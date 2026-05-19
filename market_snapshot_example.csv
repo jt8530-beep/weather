@@ -1,0 +1,5 @@
+city,target_date,temp_type,lower_f,upper_f,side,price,spread,depth_usd,question,slug
+Seattle,2026-05-06,high,61,67,YES,0.24,0.04,120,"Highest temperature in Seattle on May 6","example-seattle-61-67-yes"
+Seattle,2026-05-06,high,67,73,NO,0.31,0.05,90,"Highest temperature in Seattle on May 6","example-seattle-67-73-no"
+Austin,2026-05-06,high,95,100,YES,0.22,0.06,85,"Highest temperature in Austin on May 6","example-austin-95-100-yes"
+Austin,2026-05-06,high,100,105,NO,0.35,0.05,100,"Highest temperature in Austin on May 6","example-austin-100-105-no"
