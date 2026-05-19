@@ -4,9 +4,9 @@
 
 Robustness goals:
 - Preserve original slugs so temperature ranges such as 61-67F are not destroyed.
-- Also use a spaced slug copy so city/date parsing still works.
+- Do not treat date fragments such as may-6-61 as a temperature bucket.
+- Prefer explicit Fahrenheit ranges, then the last plausible narrow range.
 - Accept 61-67F, 61-67°F, 61–67°F, 61 to 67 F, between 61 and 67.
-- Accept range text even when the unit is omitted in the slug.
 - Support basic station map overrides by slug or market id.
 """
 
@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from dateutil import parser as date_parser
 
@@ -58,9 +58,37 @@ def load_station_map(path: str = "station_map.json") -> Dict[str, Any]:
         return json.load(f)
 
 
+def market_text_parts(market: Dict[str, Any]) -> List[str]:
+    fields = [
+        "question",
+        "title",
+        "groupItemTitle",
+        "groupItemThreshold",
+        "outcome",
+        "name",
+        "slug",
+        "subtitle",
+        "description",
+        "rules",
+        "resolutionSource",
+        "resolutionCriteria",
+    ]
+    parts: List[str] = []
+    for key in fields:
+        val = market.get(key)
+        if val is None:
+            continue
+        if isinstance(val, (list, dict)):
+            val = json.dumps(val, ensure_ascii=False)
+        s = str(val)
+        if s:
+            parts.append(s)
+            if key == "slug":
+                parts.append(s.replace("-", " ").replace("_", " "))
+    return parts
+
+
 def compact_market_text(question: str, slug: str, rules: str) -> str:
-    # Keep the original slug, because 61-67F must remain a range.
-    # Also add a spaced copy, because city/date parsing works better on words.
     spaced_slug = slug.replace("-", " ").replace("_", " ")
     return " ".join([question or "", slug or "", spaced_slug, rules or ""])
 
@@ -69,8 +97,7 @@ def has_temperature_context(text: str) -> bool:
     t = text.lower()
     if any(k in t for k in ["temperature", "highest", "lowest", "high temp", "low temp", "weather"]):
         return True
-    # Fallback for slugs that are terse but still contain a temp bucket and city/date words.
-    if re.search(r"\d{1,3}\s*(?:-|–|—|to)\s*\d{1,3}\s*(?:f|fahrenheit)?\b", t):
+    if re.search(r"\d{1,3}\s*(?:-|–|—|to)\s*\d{1,3}\s*(?:f|fahrenheit)\b", t):
         return True
     return False
 
@@ -117,30 +144,70 @@ def parse_temp_type(text: str) -> str:
     return "high"
 
 
+def _valid_bucket(a: float, b: float) -> bool:
+    lo, hi = min(a, b), max(a, b)
+    width = hi - lo
+    return -80 <= lo <= 140 and -80 <= hi <= 140 and 0 < width <= 35
+
+
 def parse_bucket_f(text: str) -> Tuple[Optional[float], Optional[float]]:
-    t = text.replace("–", "-").replace("—", "-")
-    # 61-67F, 61-67°F, 61 to 67 F, 61 through 67 fahrenheit.
-    m = re.search(r"(-?\d{1,3}(?:\.\d+)?)\s*(?:-|to|through|and)\s*(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:deg|degree|degrees|°)?\s*(?:[Ff]|fahrenheit))?\b", t, re.I)
-    if m:
-        a, b = float(m.group(1)), float(m.group(2))
-        if -80 <= a <= 140 and -80 <= b <= 140 and abs(a - b) <= 80:
-            return min(a, b), max(a, b)
+    """Parse a Fahrenheit temperature bucket.
 
-    # between 61 and 67, optionally with F after either bound.
-    m = re.search(r"between\s+(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:[Ff]|fahrenheit))?\s+and\s+(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:[Ff]|fahrenheit))?", t, re.I)
-    if m:
-        a, b = float(m.group(1)), float(m.group(2))
-        if -80 <= a <= 140 and -80 <= b <= 140 and abs(a - b) <= 80:
-            return min(a, b), max(a, b)
+    Important: slugs often look like `may-6-61-67f`. A naive first-match regex
+    sees `6-61`, which is wrong. This function collects candidates and selects
+    the best one by: explicit F unit > between phrase > plausible final range.
+    """
+    t = (text or "").replace("–", "-").replace("—", "-")
+    candidates: List[Tuple[int, int, float, float]] = []
 
-    m = re.search(r"(?:above|over|greater than|higher than|at least)\s*(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:deg|degree|degrees|°)?\s*(?:[Ff]|fahrenheit))?\b", t, re.I)
-    if m:
+    # Highest confidence: explicit Fahrenheit unit after upper bound.
+    explicit_pat = re.compile(
+        r"(?<!\d)(-?\d{1,3}(?:\.\d+)?)\s*(?:-|to|through|and)\s*"
+        r"(-?\d{1,3}(?:\.\d+)?)\s*(?:deg|degree|degrees|°)?\s*(?:[Ff]|fahrenheit)\b",
+        re.I,
+    )
+    for m in explicit_pat.finditer(t):
+        a, b = float(m.group(1)), float(m.group(2))
+        if _valid_bucket(a, b):
+            candidates.append((3000 + m.start(), m.start(), min(a, b), max(a, b)))
+
+    # High confidence: between 61 and 67, optionally with units.
+    between_pat = re.compile(
+        r"between\s+(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:[Ff]|fahrenheit))?\s+and\s+"
+        r"(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:[Ff]|fahrenheit))?",
+        re.I,
+    )
+    for m in between_pat.finditer(t):
+        a, b = float(m.group(1)), float(m.group(2))
+        if _valid_bucket(a, b):
+            candidates.append((2500 + m.start(), m.start(), min(a, b), max(a, b)))
+
+    # Lower confidence fallback: narrow ranges without unit. Prefer later ranges.
+    # This catches group titles like `61-67` but filters out `6-61` via width <= 35.
+    no_unit_pat = re.compile(
+        r"(?<!\d)(-?\d{1,3}(?:\.\d+)?)\s*(?:-|to|through)\s*"
+        r"(-?\d{1,3}(?:\.\d+)?)(?!\d)",
+        re.I,
+    )
+    for m in no_unit_pat.finditer(t):
+        a, b = float(m.group(1)), float(m.group(2))
+        if _valid_bucket(a, b):
+            tail_bonus = 500 if m.end() >= max(0, len(t) - 20) else 0
+            candidates.append((1000 + tail_bonus + m.start(), m.start(), min(a, b), max(a, b)))
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        _, _, lo, hi = candidates[0]
+        return lo, hi
+
+    above_pat = re.compile(r"(?:above|over|greater than|higher than|at least)\s*(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:deg|degree|degrees|°)?\s*(?:[Ff]|fahrenheit))?\b", re.I)
+    for m in above_pat.finditer(t):
         x = float(m.group(1))
         if -80 <= x <= 140:
             return x, None
 
-    m = re.search(r"(?:below|under|less than|lower than|at most)\s*(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:deg|degree|degrees|°)?\s*(?:[Ff]|fahrenheit))?\b", t, re.I)
-    if m:
+    below_pat = re.compile(r"(?:below|under|less than|lower than|at most)\s*(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:deg|degree|degrees|°)?\s*(?:[Ff]|fahrenheit))?\b", re.I)
+    for m in below_pat.finditer(t):
         x = float(m.group(1))
         if -80 <= x <= 140:
             return None, x
@@ -186,7 +253,7 @@ def parse_weather_market(market: Dict[str, Any], station_map: Dict[str, Any]) ->
     slug = str(market.get("slug") or "")
     market_id = str(market.get("id") or market.get("conditionId") or slug)
     rules = rules_text_from_market(market)
-    text = compact_market_text(question, slug, rules)
+    text = " ".join(market_text_parts(market)) or compact_market_text(question, slug, rules)
     if not has_temperature_context(text):
         return None
 
