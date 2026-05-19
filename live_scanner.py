@@ -45,6 +45,8 @@ class Row:
     city: str
     station_id: str
     station_name: str
+    station_source: str
+    rule_warning: str
     target_date: str
     temp_type: str
     lower_f: Optional[float]
@@ -101,6 +103,8 @@ def make_row(market: ParsedWeatherMarket, config: Dict[str, Any], outcome: str, 
         city=market.city,
         station_id=market.station_id,
         station_name=market.station_name,
+        station_source=market.station_source,
+        rule_warning=market.rule_warning,
         target_date=str(market.target_date),
         temp_type=market.temp_type,
         lower_f=market.lower_f,
@@ -175,13 +179,15 @@ def run_once(config: Dict[str, Any], top: int) -> List[Row]:
     append_rows(out_path, rows)
     print(f"parsed={parsed} rows={len(rows)} saved={out_path}")
     for row in rows[:top]:
-        print(f"{row.outcome:9s} edge={row.edge:.3f} price={row.price:.3f} model={row.model_prob:.3f} {row.city} {row.target_date} {row.lower_f}-{row.upper_f}F station={row.station_id}")
+        warn = f" warn={row.rule_warning}" if row.rule_warning else ""
+        print(f"{row.outcome:9s} edge={row.edge:.3f} price={row.price:.3f} model={row.model_prob:.3f} {row.city} {row.target_date} {row.lower_f}-{row.upper_f}F station={row.station_id}{warn}")
     return rows
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="weather_scanner_config_v2_ocr.json")
+    parser.add_argument("--once", action="store_true", help="Run one scan and exit. This is also the default when --loop is not set.")
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--sleep", type=int, default=None)
     parser.add_argument("--top", type=int, default=20)
