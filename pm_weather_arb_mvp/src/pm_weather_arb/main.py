@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from .clob import ClobPublicClient, parse_book
 from .config import Config
 from .gamma import GammaClient, parse_markets_from_events
+from .near_miss import diagnose_near_misses, print_diagnostics, write_near_miss_csv
 from .paper_executor import PaperExecutor, append_csv, append_jsonl
 from .report import print_summary, write_csv
 from .scanners import scan_all
@@ -71,9 +72,29 @@ def _scan_from_args(args: argparse.Namespace) -> tuple[list[Market], dict[str, O
     return markets, books, opportunities
 
 
+def _maybe_write_near_misses(args: argparse.Namespace, markets: list[Market], books: dict[str, OrderBook]) -> None:
+    near_miss_output = getattr(args, "near_miss_output", None)
+    diagnostics_only = bool(getattr(args, "diagnostics", False))
+    if not near_miss_output and not diagnostics_only:
+        return
+    diagnostics, near_misses = diagnose_near_misses(
+        markets=markets,
+        books=books,
+        fee_rate=Decimal(str(args.fee_rate)),
+        min_shares=Decimal(str(args.min_shares)),
+        max_shares=Decimal(str(args.max_shares)),
+        top_n=int(getattr(args, "near_miss_top", 50)),
+    )
+    print_diagnostics(diagnostics, near_misses, top_n=min(int(args.top), 10))
+    if near_miss_output:
+        write_near_miss_csv(near_misses, near_miss_output)
+        print(f"wrote={near_miss_output}")
+
+
 def run_scan(args: argparse.Namespace) -> int:
-    _, _, opportunities = _scan_from_args(args)
+    markets, books, opportunities = _scan_from_args(args)
     print_summary(opportunities, top_n=args.top)
+    _maybe_write_near_misses(args, markets, books)
     if args.output:
         write_csv(opportunities, args.output)
         print(f"wrote={args.output}")
@@ -81,8 +102,9 @@ def run_scan(args: argparse.Namespace) -> int:
 
 
 def run_paper(args: argparse.Namespace) -> int:
-    _, books, opportunities = _scan_from_args(args)
+    markets, books, opportunities = _scan_from_args(args)
     print_summary(opportunities, top_n=args.top)
+    _maybe_write_near_misses(args, markets, books)
     executor = PaperExecutor(
         max_notional_per_trade=Decimal(str(args.max_notional)),
         max_book_age_ms=int(args.max_book_age_ms),
@@ -123,6 +145,9 @@ def _add_scan_args(scan: argparse.ArgumentParser) -> None:
     scan.add_argument("--top", type=int, default=20)
     scan.add_argument("--fixture", help="load fixture JSON instead of live API")
     scan.add_argument("--all-markets", action="store_true", help="disable weather keyword filter")
+    scan.add_argument("--diagnostics", action="store_true", help="print scanner diagnostics even if near-miss output is disabled")
+    scan.add_argument("--near-miss-output", default="near_misses.csv", help="write closest non-arb candidates for debugging; use empty string to disable")
+    scan.add_argument("--near-miss-top", type=int, default=50, help="number of near-misses to keep in CSV")
 
 
 def build_parser() -> argparse.ArgumentParser:
