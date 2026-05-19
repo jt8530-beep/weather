@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from datetime import datetime
-
 from weather_market_parser import parse_bucket_f, parse_weather_market
 
 
@@ -25,6 +23,8 @@ def test_bucket_variants():
         ("61–67°F", (61.0, 67.0)),
         ("61 to 67 F", (61.0, 67.0)),
         ("between 61 and 67", (61.0, 67.0)),
+        ("highest-temperature-in-seattle-on-may-6-61-67f", (61.0, 67.0)),
+        ("highest-temperature-in-seattle-on-may-6-61-67", (61.0, 67.0)),
         ("above 73F", (73.0, None)),
         ("below 61F", (None, 61.0)),
     ]
@@ -33,10 +33,9 @@ def test_bucket_variants():
 
 
 def test_parse_market_slug_range_preserved():
-    current_year = datetime.utcnow().year
     market = {
         "id": "test-id",
-        "question": f"Highest temperature in Seattle on May 6?",
+        "question": "Highest temperature in Seattle on May 6?",
         "slug": "highest-temperature-in-seattle-on-may-6-61-67f",
         "outcomes": '["Yes", "No"]',
         "clobTokenIds": '["yes-token", "no-token"]',
