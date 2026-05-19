@@ -18,6 +18,8 @@ while true; do
     --fee-rate "${PM_FEE_RATE:-0.05}" \
     --max-notional "${PM_MAX_NOTIONAL_PER_TRADE:-10}" \
     --output opportunities.csv \
+    --near-miss-output near_misses.csv \
+    --near-miss-top "${PM_NEAR_MISS_TOP:-50}" \
     --paper-csv paper_logs/paper_executions.csv \
     --paper-jsonl paper_logs/paper_executions.jsonl 2>&1 | tee -a "$LOG_DIR/paper_stdout.log"
   sleep "$SLEEP_SECONDS"
