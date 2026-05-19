@@ -1,0 +1,98 @@
+{
+  "seattle": {
+    "station_id": "KSEA",
+    "station_name": "Seattle-Tacoma International Airport",
+    "latitude": 47.4502,
+    "longitude": -122.3088,
+    "timezone": "America/Los_Angeles",
+    "source": "manual_station_map"
+  },
+  "new york": {
+    "station_id": "KNYC",
+    "station_name": "New York Central Park",
+    "latitude": 40.7812,
+    "longitude": -73.9665,
+    "timezone": "America/New_York",
+    "source": "manual_station_map"
+  },
+  "nyc": {
+    "station_id": "KNYC",
+    "station_name": "New York Central Park",
+    "latitude": 40.7812,
+    "longitude": -73.9665,
+    "timezone": "America/New_York",
+    "source": "manual_station_map"
+  },
+  "austin": {
+    "station_id": "KAUS",
+    "station_name": "Austin-Bergstrom International Airport",
+    "latitude": 30.1975,
+    "longitude": -97.6664,
+    "timezone": "America/Chicago",
+    "source": "manual_station_map"
+  },
+  "chicago": {
+    "station_id": "KMDW",
+    "station_name": "Chicago Midway International Airport",
+    "latitude": 41.7868,
+    "longitude": -87.7522,
+    "timezone": "America/Chicago",
+    "source": "manual_station_map"
+  },
+  "miami": {
+    "station_id": "KMIA",
+    "station_name": "Miami International Airport",
+    "latitude": 25.7959,
+    "longitude": -80.2870,
+    "timezone": "America/New_York",
+    "source": "manual_station_map"
+  },
+  "los angeles": {
+    "station_id": "KCQT",
+    "station_name": "Los Angeles Downtown USC",
+    "latitude": 34.0236,
+    "longitude": -118.2911,
+    "timezone": "America/Los_Angeles",
+    "source": "manual_station_map"
+  },
+  "san francisco": {
+    "station_id": "KSFO",
+    "station_name": "San Francisco International Airport",
+    "latitude": 37.6213,
+    "longitude": -122.3790,
+    "timezone": "America/Los_Angeles",
+    "source": "manual_station_map"
+  },
+  "denver": {
+    "station_id": "KDEN",
+    "station_name": "Denver International Airport",
+    "latitude": 39.8561,
+    "longitude": -104.6737,
+    "timezone": "America/Denver",
+    "source": "manual_station_map"
+  },
+  "phoenix": {
+    "station_id": "KPHX",
+    "station_name": "Phoenix Sky Harbor International Airport",
+    "latitude": 33.4352,
+    "longitude": -112.0101,
+    "timezone": "America/Phoenix",
+    "source": "manual_station_map"
+  },
+  "boston": {
+    "station_id": "KBOS",
+    "station_name": "Boston Logan International Airport",
+    "latitude": 42.3656,
+    "longitude": -71.0096,
+    "timezone": "America/New_York",
+    "source": "manual_station_map"
+  },
+  "london": {
+    "station_id": "EGLL",
+    "station_name": "London Heathrow Airport",
+    "latitude": 51.4700,
+    "longitude": -0.4543,
+    "timezone": "Europe/London",
+    "source": "manual_station_map"
+  }
+}
