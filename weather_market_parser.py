@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Weather market parser and station mapping helpers."""
+"""Weather market parser and station mapping helpers.
+
+Robustness goals:
+- Preserve original slugs so temperature ranges such as 61-67F are not destroyed.
+- Also use a spaced slug copy so city/date parsing still works.
+- Accept 61-67F, 61-67°F, 61–67°F, 61 to 67 F, between 61 and 67.
+- Accept range text even when the unit is omitted in the slug.
+- Support basic station map overrides by slug or market id.
+"""
 
 from __future__ import annotations
 
@@ -35,6 +43,7 @@ class ParsedWeatherMarket:
     longitude: float
     timezone: str
     station_source: str
+    rule_warning: str
 
 
 def norm(s: str) -> str:
@@ -49,17 +58,35 @@ def load_station_map(path: str = "station_map.json") -> Dict[str, Any]:
         return json.load(f)
 
 
-def is_weather_temperature_text(text: str) -> bool:
+def compact_market_text(question: str, slug: str, rules: str) -> str:
+    # Keep the original slug, because 61-67F must remain a range.
+    # Also add a spaced copy, because city/date parsing works better on words.
+    spaced_slug = slug.replace("-", " ").replace("_", " ")
+    return " ".join([question or "", slug or "", spaced_slug, rules or ""])
+
+
+def has_temperature_context(text: str) -> bool:
     t = text.lower()
-    keys = ["temperature", "highest", "lowest", "high temp", "low temp", "weather"]
-    units = ["°f", " fahrenheit", " f", " degrees"]
-    return any(k in t for k in keys) and any(u in t for u in units)
+    if any(k in t for k in ["temperature", "highest", "lowest", "high temp", "low temp", "weather"]):
+        return True
+    # Fallback for slugs that are terse but still contain a temp bucket and city/date words.
+    if re.search(r"\d{1,3}\s*(?:-|–|—|to)\s*\d{1,3}\s*(?:f|fahrenheit)?\b", t):
+        return True
+    return False
 
 
 def parse_city(text: str) -> Optional[str]:
-    m = re.search(r"\bin\s+([A-Za-z .'-]+?)(?:\s+on\s+|\s+for\s+|\?|$)", text, re.I)
-    if m:
-        city = re.sub(r"\bCity\b", "", m.group(1), flags=re.I).strip(" .")
+    patterns = [
+        r"\bin\s+([A-Za-z .,'-]+?)(?:\s+on\s+|\s+for\s+|\?|$)",
+        r"\btemperature\s+in\s+([A-Za-z .,'-]+?)(?:\s+on\s+|\s+for\s+|\?|$)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.I)
+        if not m:
+            continue
+        city = m.group(1).strip(" .,'-")
+        city = re.sub(r"\bCity\b", "", city, flags=re.I).strip(" .,'-")
+        city = re.sub(r",?\s+(TX|Texas|WA|Washington|NY|New York|CA|California|FL|Florida|IL|Illinois|CO|Colorado|AZ|Arizona|MA|Massachusetts|UK|England)$", "", city, flags=re.I).strip(" .,'-")
         if 2 <= len(city) <= 50:
             return city
     return None
@@ -85,23 +112,39 @@ def parse_target_date(text: str) -> Optional[date]:
 
 def parse_temp_type(text: str) -> str:
     t = text.lower()
-    if "lowest" in t or "minimum" in t or " low " in t:
+    if "lowest" in t or "minimum" in t or " low temperature" in t or " low temp" in t:
         return "low"
     return "high"
 
 
 def parse_bucket_f(text: str) -> Tuple[Optional[float], Optional[float]]:
     t = text.replace("–", "-").replace("—", "-")
-    m = re.search(r"(-?\d{1,3}(?:\.\d+)?)\s*(?:-|to|through|and)\s*(-?\d{1,3}(?:\.\d+)?)\s*(?:deg|degrees|°)?\s*[Ff]", t)
+    # 61-67F, 61-67°F, 61 to 67 F, 61 through 67 fahrenheit.
+    m = re.search(r"(-?\d{1,3}(?:\.\d+)?)\s*(?:-|to|through|and)\s*(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:deg|degree|degrees|°)?\s*(?:[Ff]|fahrenheit))?\b", t, re.I)
     if m:
         a, b = float(m.group(1)), float(m.group(2))
-        return min(a, b), max(a, b)
-    m = re.search(r"(?:above|over|greater than|higher than|at least)\s*(-?\d{1,3}(?:\.\d+)?)\s*(?:deg|degrees|°)?\s*[Ff]", t, re.I)
+        if -80 <= a <= 140 and -80 <= b <= 140 and abs(a - b) <= 80:
+            return min(a, b), max(a, b)
+
+    # between 61 and 67, optionally with F after either bound.
+    m = re.search(r"between\s+(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:[Ff]|fahrenheit))?\s+and\s+(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:[Ff]|fahrenheit))?", t, re.I)
     if m:
-        return float(m.group(1)), None
-    m = re.search(r"(?:below|under|less than|lower than|at most)\s*(-?\d{1,3}(?:\.\d+)?)\s*(?:deg|degrees|°)?\s*[Ff]", t, re.I)
+        a, b = float(m.group(1)), float(m.group(2))
+        if -80 <= a <= 140 and -80 <= b <= 140 and abs(a - b) <= 80:
+            return min(a, b), max(a, b)
+
+    m = re.search(r"(?:above|over|greater than|higher than|at least)\s*(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:deg|degree|degrees|°)?\s*(?:[Ff]|fahrenheit))?\b", t, re.I)
     if m:
-        return None, float(m.group(1))
+        x = float(m.group(1))
+        if -80 <= x <= 140:
+            return x, None
+
+    m = re.search(r"(?:below|under|less than|lower than|at most)\s*(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:deg|degree|degrees|°)?\s*(?:[Ff]|fahrenheit))?\b", t, re.I)
+    if m:
+        x = float(m.group(1))
+        if -80 <= x <= 140:
+            return None, x
+
     return None, None
 
 
@@ -115,34 +158,58 @@ def rules_text_from_market(market: Dict[str, Any]) -> str:
     return "\n".join(chunks)
 
 
-def station_for_city(city: str, station_map: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def clean_city_key(city: str) -> str:
     key = norm(city).replace(" city", "")
+    key = re.sub(r",?\s+(tx|texas|wa|washington|ny|new york|ca|california|fl|florida|il|illinois|co|colorado|az|arizona|ma|massachusetts|uk|england)$", "", key)
+    return key.strip()
+
+
+def station_for_market(market_id: str, slug: str, city: str, station_map: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
+    overrides = station_map.get("_market_overrides", {}) if isinstance(station_map, dict) else {}
+    for override_key in [market_id, slug]:
+        if override_key and override_key in overrides:
+            return overrides[override_key], "market_override"
+
+    key = clean_city_key(city)
     if key in station_map:
-        return station_map[key]
+        return station_map[key], "city_seed"
     for k, v in station_map.items():
-        if key == norm(k).replace(" city", ""):
-            return v
-    return None
+        if k.startswith("_"):
+            continue
+        if key == clean_city_key(k):
+            return v, "city_seed"
+    return None, "missing_station_map"
 
 
 def parse_weather_market(market: Dict[str, Any], station_map: Dict[str, Any]) -> Optional[ParsedWeatherMarket]:
     question = str(market.get("question") or market.get("title") or "")
     slug = str(market.get("slug") or "")
+    market_id = str(market.get("id") or market.get("conditionId") or slug)
     rules = rules_text_from_market(market)
-    text = " ".join([question, slug.replace("-", " "), rules])
-    if not is_weather_temperature_text(text):
+    text = compact_market_text(question, slug, rules)
+    if not has_temperature_context(text):
         return None
+
     city = parse_city(text)
     target_date = parse_target_date(text)
     lower_f, upper_f = parse_bucket_f(text)
     yes_token, no_token = extract_yes_no_tokens(market)
     if not city or not target_date or not yes_token or not no_token or (lower_f is None and upper_f is None):
         return None
-    station = station_for_city(city, station_map)
+
+    station, station_source = station_for_market(market_id, slug, city, station_map)
     if not station:
         return None
+
+    warning = ""
+    rules_low = rules.lower()
+    if station_source == "city_seed":
+        warning = "station_from_seed_map_verify_resolution_rules"
+    if rules and station.get("station_id", "").lower() not in rules_low and station.get("station_name", "").lower() not in rules_low:
+        warning = "station_not_explicitly_confirmed_in_rules"
+
     return ParsedWeatherMarket(
-        market_id=str(market.get("id") or market.get("conditionId") or slug),
+        market_id=market_id,
         question=question,
         slug=slug,
         city=city,
@@ -158,5 +225,6 @@ def parse_weather_market(market: Dict[str, Any], station_map: Dict[str, Any]) ->
         latitude=float(station["latitude"]),
         longitude=float(station["longitude"]),
         timezone=str(station.get("timezone", "UTC")),
-        station_source=str(station.get("source", "manual")),
+        station_source=station_source,
+        rule_warning=warning,
     )
