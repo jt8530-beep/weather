@@ -150,28 +150,36 @@ def _valid_bucket(a: float, b: float) -> bool:
     return -80 <= lo <= 140 and -80 <= hi <= 140 and 0 < width <= 35
 
 
+def _number_start_boundary() -> str:
+    # Critical: in slugs like may-6-61-67f, the dash after 'may' is a word
+    # separator, not a negative sign. This boundary blocks matching '-6'.
+    return r"(?<![A-Za-z0-9])"
+
+
 def parse_bucket_f(text: str) -> Tuple[Optional[float], Optional[float]]:
     """Parse a Fahrenheit temperature bucket.
 
-    Important: slugs often look like `may-6-61-67f`. A naive first-match regex
-    sees `6-61`, which is wrong. This function collects candidates and selects
-    the best one by: explicit F unit > between phrase > plausible final range.
+    Slugs often look like `may-6-61-67f`. A naive first-match regex can see
+    `-6-61`, which is wrong. This function blocks slug separator dashes from
+    becoming negative signs, then ranks candidates:
+    explicit F range > between phrase > plausible final narrow range.
     """
     t = (text or "").replace("–", "-").replace("—", "-")
     candidates: List[Tuple[int, int, float, float]] = []
+    boundary = _number_start_boundary()
 
-    # Highest confidence: explicit Fahrenheit unit after upper bound.
     explicit_pat = re.compile(
-        r"(?<!\d)(-?\d{1,3}(?:\.\d+)?)\s*(?:-|to|through|and)\s*"
-        r"(-?\d{1,3}(?:\.\d+)?)\s*(?:deg|degree|degrees|°)?\s*(?:[Ff]|fahrenheit)\b",
+        boundary
+        + r"(-?\d{1,3}(?:\.\d+)?)\s*(?:-|to|through|and)\s*"
+        + r"(-?\d{1,3}(?:\.\d+)?)\s*(?:deg|degree|degrees|°)?\s*(?:[Ff]|fahrenheit)\b",
         re.I,
     )
     for m in explicit_pat.finditer(t):
         a, b = float(m.group(1)), float(m.group(2))
         if _valid_bucket(a, b):
-            candidates.append((3000 + m.start(), m.start(), min(a, b), max(a, b)))
+            # Explicit unit plus later position wins. This targets slug tails like 61-67f.
+            candidates.append((100000 + m.start(), m.start(), min(a, b), max(a, b)))
 
-    # High confidence: between 61 and 67, optionally with units.
     between_pat = re.compile(
         r"between\s+(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:[Ff]|fahrenheit))?\s+and\s+"
         r"(-?\d{1,3}(?:\.\d+)?)(?:\s*(?:[Ff]|fahrenheit))?",
@@ -180,20 +188,19 @@ def parse_bucket_f(text: str) -> Tuple[Optional[float], Optional[float]]:
     for m in between_pat.finditer(t):
         a, b = float(m.group(1)), float(m.group(2))
         if _valid_bucket(a, b):
-            candidates.append((2500 + m.start(), m.start(), min(a, b), max(a, b)))
+            candidates.append((80000 + m.start(), m.start(), min(a, b), max(a, b)))
 
-    # Lower confidence fallback: narrow ranges without unit. Prefer later ranges.
-    # This catches group titles like `61-67` but filters out `6-61` via width <= 35.
     no_unit_pat = re.compile(
-        r"(?<!\d)(-?\d{1,3}(?:\.\d+)?)\s*(?:-|to|through)\s*"
-        r"(-?\d{1,3}(?:\.\d+)?)(?!\d)",
+        boundary
+        + r"(-?\d{1,3}(?:\.\d+)?)\s*(?:-|to|through)\s*"
+        + r"(-?\d{1,3}(?:\.\d+)?)(?!\d)",
         re.I,
     )
     for m in no_unit_pat.finditer(t):
         a, b = float(m.group(1)), float(m.group(2))
         if _valid_bucket(a, b):
-            tail_bonus = 500 if m.end() >= max(0, len(t) - 20) else 0
-            candidates.append((1000 + tail_bonus + m.start(), m.start(), min(a, b), max(a, b)))
+            # Only a fallback. Still prefer the last plausible range, not the first.
+            candidates.append((10000 + m.start(), m.start(), min(a, b), max(a, b)))
 
     if candidates:
         candidates.sort(key=lambda x: x[0], reverse=True)
