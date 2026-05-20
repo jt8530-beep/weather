@@ -188,24 +188,24 @@ def run_paper(args: argparse.Namespace) -> int:
         reasons_str = ",".join(f"{k}:{v}" for k, v in sorted(invalid_reasons.items()))
         print(f"temperature_bucket_events_checked={temp_checked} valid={temp_valid} invalid={temp_invalid} invalid_reasons={reasons_str}")
 
-    # V6: diagnostic for valid temperature bucket events → per-bucket books + sum metrics
+    # V6: diagnostic for valid temperature bucket events → four-way arb evaluation
     for event_id, v in temp_validations.items():
         if not v.is_valid:
             continue
-        event_opps = [opp for opp in opportunities if opp.event_id == event_id and opp.kind in ("NEGRISK_BUY_ALL_YES", "NEGRISK_BUY_ALL_NO")]
-        bucket_range = f"[<={v.buckets[0].value}{v.unit}]" if v.buckets else ""
-        for b in v.buckets:
-            if b.kind == "lower":
-                bucket_range = f"[<={v.buckets[0].value}{v.unit} .. >={b.value}{v.unit}]"
-                break
 
-        # Per-bucket book snapshot
+        # Per-bucket book snapshot + detailed missing counts
         sum_yes_ask = 0.0
         sum_yes_bid = 0.0
         sum_no_ask = 0.0
         sum_no_bid = 0.0
-        books_found = 0
-        missing_books = 0
+        yes_ask_count = 0
+        yes_bid_count = 0
+        no_ask_count = 0
+        no_bid_count = 0
+        missing_yes_ask = 0
+        missing_yes_bid = 0
+        missing_no_ask = 0
+        missing_no_bid = 0
         for b in v.buckets:
             yb = books.get(b.token_yes)
             nb = books.get(b.token_no)
@@ -213,18 +213,26 @@ def run_paper(args: argparse.Namespace) -> int:
             yb_p = float(yb.best_bid()) if yb and yb.best_bid() is not None else None
             na = float(nb.best_ask()) if nb and nb.best_ask() is not None else None
             nb_p = float(nb.best_bid()) if nb and nb.best_bid() is not None else None
-            has_book = (ya is not None and na is not None)
-            if has_book:
-                books_found += 1
+            if ya is not None:
+                yes_ask_count += 1
                 sum_yes_ask += ya
-                if yb_p is not None:
-                    sum_yes_bid += yb_p
-                if na is not None:
-                    sum_no_ask += na
-                if nb_p is not None:
-                    sum_no_bid += nb_p
             else:
-                missing_books += 1
+                missing_yes_ask += 1
+            if yb_p is not None:
+                yes_bid_count += 1
+                sum_yes_bid += yb_p
+            else:
+                missing_yes_bid += 1
+            if na is not None:
+                no_ask_count += 1
+                sum_no_ask += na
+            else:
+                missing_no_ask += 1
+            if nb_p is not None:
+                no_bid_count += 1
+                sum_no_bid += nb_p
+            else:
+                missing_no_bid += 1
             ya_s = f"{ya:.4f}" if ya is not None else "none"
             yb_s = f"{yb_p:.4f}" if yb_p is not None else "none"
             na_s = f"{na:.4f}" if na is not None else "none"
@@ -232,15 +240,49 @@ def run_paper(args: argparse.Namespace) -> int:
             print(f"TEMP_BUCKET_BOOK bucket={b.kind}={b.value}{v.unit} yes_ask={ya_s} yes_bid={yb_s} no_ask={na_s} no_bid={nb_s}")
 
         k = v.bucket_count
-        exhaustive = (k == (int(float(v.buckets[-1].value)) - int(float(v.buckets[0].value)) + 1))
         print(
-            f"TEMP_BUCKET_SUM event={v.event_title[:60]} "
-            f"sum_yes_ask={sum_yes_ask:.4f} sum_yes_bid={sum_yes_bid:.4f} "
-            f"sum_no_ask={sum_no_ask:.4f} sum_no_bid={sum_no_bid:.4f} "
-            f"k={k} exhaustive={exhaustive} negrisk=True "
-            f"books_found={books_found} missing_books={missing_books} "
-            f"opportunities={len(event_opps)}"
+            f"TEMP_BUCKET_COUNTS "
+            f"yes_ask={yes_ask_count}/{k} yes_bid={yes_bid_count}/{k} no_ask={no_ask_count}/{k} no_bid={no_bid_count}/{k} "
+            f"miss_ya={missing_yes_ask} miss_yb={missing_yes_bid} miss_na={missing_no_ask} miss_nb={missing_no_bid}"
         )
+
+        # BUY_ALL_YES: buy every YES, payout = 1
+        buy_yes_edge = 1.0 - sum_yes_ask - float(args.fee_rate)
+        buy_yes_full = (yes_ask_count == k)
+        if buy_yes_full and buy_yes_edge > 0:
+            buy_yes_status = f"profitable edge={buy_yes_edge:.4f}"
+        elif buy_yes_full:
+            buy_yes_status = f"rejected sum_yes_ask={sum_yes_ask:.4f} > 1"
+        else:
+            buy_yes_status = f"rejected missing_yes_ask={missing_yes_ask}"
+        print(f"TEMP_BUCKET_ARB direction=BUY_ALL_YES sum_yes_ask={sum_yes_ask:.4f} gross_edge={buy_yes_edge:.4f} full={buy_yes_full} status={buy_yes_status}")
+
+        # BUY_ALL_NO: buy every NO, payout = k-1 (exactly one YES wins)
+        buy_no_edge = float(k - 1) - sum_no_ask - float(args.fee_rate)
+        buy_no_full = (no_ask_count == k)
+        if buy_no_full and buy_no_edge > 0:
+            buy_no_status = f"profitable edge={buy_no_edge:.4f}"
+        elif buy_no_full:
+            buy_no_status = f"rejected sum_no_ask={sum_no_ask:.4f} > {k-1}"
+        else:
+            buy_no_status = f"rejected missing_no_ask={missing_no_ask} req={k} avail={no_ask_count}"
+        print(f"TEMP_BUCKET_ARB direction=BUY_ALL_NO sum_no_ask={sum_no_ask:.4f} gross_edge={buy_no_edge:.4f} full={buy_no_full} status={buy_no_status}")
+
+        # SELL_ALL_YES: sell every YES (mint/redeem complete set), gross = sum_yes_bid
+        sell_yes_edge = sum_yes_bid - 1.0 - float(args.fee_rate)
+        sell_yes_full = (yes_bid_count == k)
+        if sell_yes_full and sell_yes_edge > 0:
+            sell_yes_status = f"theoretical_gross edge={sell_yes_edge:.4f} requires_mint_negrisk_verified"
+        elif sell_yes_full:
+            sell_yes_status = f"rejected sum_yes_bid={sum_yes_bid:.4f} < 1"
+        else:
+            sell_yes_status = f"rejected missing_yes_bid={missing_yes_bid}"
+        print(f"TEMP_BUCKET_ARB direction=SELL_ALL_YES sum_yes_bid={sum_yes_bid:.4f} gross_edge={sell_yes_edge:.4f} full={sell_yes_full} status={sell_yes_status}")
+
+        # SELL_ALL_NO: sell every NO, theoretical only
+        sell_no_full = (no_bid_count == k)
+        sell_no_status = f"bid_count={no_bid_count}/{k} theoretical_only" if sell_no_full else f"rejected missing_no_bid={missing_no_bid}"
+        print(f"TEMP_BUCKET_ARB direction=SELL_ALL_NO sum_no_bid={sum_no_bid:.4f} full={sell_no_full} status={sell_no_status}")
 
     min_edge_by_kind = parse_kind_min_edges(getattr(args, "paper_min_edge_by_kind", ""))
     executor = PaperExecutor(
