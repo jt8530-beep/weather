@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 from .orderbook import quote_buy, quote_sell
+from .temperature_buckets import TemperatureBucketValidation
 from .types import Leg, Opportunity, OrderBook
 
 
@@ -50,6 +51,8 @@ class PaperExecutionResult:
     total_cost: str
     total_proceeds: str
     residual_tokens: str
+    verification_status: str
+    verification_reason: str
     legs: List[PaperLegResult]
 
 
@@ -68,6 +71,7 @@ class PaperExecutor:
         max_book_age_ms: int = 500,
         min_edge: Decimal = Decimal("0.02"),
         per_kind_min_edge: Optional[Dict[str, Decimal]] = None,
+        temperature_validations: Optional[Dict[str, TemperatureBucketValidation]] = None,
     ):
         env_allowed = os.getenv("PM_ALLOW_KINDS", DEFAULT_ALLOWED_PAPER_KINDS)
         if allowed_kinds is None:
@@ -77,6 +81,7 @@ class PaperExecutor:
         self.max_book_age_ms = max_book_age_ms
         self.min_edge = min_edge
         self.per_kind_min_edge = per_kind_min_edge or parse_kind_min_edges(os.getenv("PM_KIND_MIN_EDGE", ""))
+        self.temperature_validations = temperature_validations or {}
 
     def simulate(
         self,
@@ -165,6 +170,9 @@ class PaperExecutor:
 
         # For accepted opportunities, residual is expected until the paired set is merged or settled.
         # It is still logged explicitly so a future live executor can enforce residual limits.
+        v = self.temperature_validations.get(opportunity.event_id)
+        v_status = "verified" if (v and v.is_valid) else "unverified"
+        v_reason = v.reason if v else ""
         return PaperExecutionResult(
             ts_ms=ts_ms,
             kind=opportunity.kind,
@@ -178,6 +186,8 @@ class PaperExecutor:
             total_cost=str(total_cost),
             total_proceeds=str(total_proceeds),
             residual_tokens=" | ".join(residual),
+            verification_status=v_status,
+            verification_reason=v_reason,
             legs=leg_results,
         )
 
@@ -189,6 +199,10 @@ class PaperExecutor:
     ) -> Optional[str]:
         if opportunity.kind not in self.allowed_kinds:
             if opportunity.kind in NEGRISK_KINDS:
+                # V5: Allow NegRisk if event is verified temperature bucket
+                validation = self.temperature_validations.get(opportunity.event_id)
+                if validation and validation.is_valid:
+                    return None  # accept — pass through to execution
                 return "negrisk_disabled_requires_manual_verification"
             return f"kind_not_allowed:{opportunity.kind}"
         required_edge = self.per_kind_min_edge.get(opportunity.kind, self.min_edge)
@@ -219,6 +233,9 @@ class PaperExecutor:
         leg_results: List[PaperLegResult],
         residual: List[str],
     ) -> PaperExecutionResult:
+        v = self.temperature_validations.get(opportunity.event_id)
+        v_status = "verified" if (v and v.is_valid) else "unverified"
+        v_reason = v.reason if v else reason
         return PaperExecutionResult(
             ts_ms=ts_ms,
             kind=opportunity.kind,
@@ -232,6 +249,8 @@ class PaperExecutor:
             total_cost=str(opportunity.total_cost),
             total_proceeds=str(opportunity.total_proceeds),
             residual_tokens=" | ".join(residual),
+            verification_status=v_status,
+            verification_reason=v_reason,
             legs=leg_results,
         )
 
@@ -364,6 +383,8 @@ def append_csv(results: Iterable[PaperExecutionResult], path: str | Path) -> Non
         "total_cost",
         "total_proceeds",
         "residual_tokens",
+        "verification_status",
+        "verification_reason",
         "legs",
     ]
     with out.open("a", newline="", encoding="utf-8") as f:

@@ -23,6 +23,7 @@ from .paper_executor import (
 )
 from .report import print_summary, write_csv
 from .scanners import scan_all
+from .temperature_buckets import TemperatureBucketValidation, validate_all_temperature_events
 from .types import Market, OrderBook
 
 
@@ -126,11 +127,26 @@ def run_paper(args: argparse.Namespace) -> int:
     markets, books, opportunities = _scan_from_args(args)
     print_summary(opportunities, top_n=args.top)
     _maybe_write_near_misses(args, markets, books)
+
+    # V5: Validate temperature bucket events
+    temp_validations = validate_all_temperature_events(markets)
+    temp_checked = len(temp_validations)
+    temp_valid = sum(1 for v in temp_validations.values() if v.is_valid)
+    temp_invalid = temp_checked - temp_valid
+    invalid_reasons: dict[str, int] = {}
+    for v in temp_validations.values():
+        if not v.is_valid:
+            invalid_reasons[v.reason] = invalid_reasons.get(v.reason, 0) + 1
+    if temp_checked > 0:
+        reasons_str = ",".join(f"{k}:{v}" for k, v in sorted(invalid_reasons.items()))
+        print(f"temperature_bucket_events_checked={temp_checked} valid={temp_valid} invalid={temp_invalid} invalid_reasons={reasons_str}")
+
     executor = PaperExecutor(
         max_notional_per_trade=Decimal(str(args.max_notional)),
         max_book_age_ms=int(args.max_book_age_ms),
         min_edge=Decimal(str(args.paper_min_edge)),
         per_kind_min_edge=parse_kind_min_edges(str(args.paper_kind_min_edge)),
+        temperature_validations=temp_validations,
     )
     seen_keys = load_seen_paper_keys(args.paper_seen_keys, args.paper_csv)
     results = []
