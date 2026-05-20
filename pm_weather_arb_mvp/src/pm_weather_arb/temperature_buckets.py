@@ -58,7 +58,7 @@ _LOWER_RE = re.compile(
     r"(?:^|\s)"
     r"(?P<value>-?\d+(?:\.\d+)?)"
     + _TEMP_UNIT +
-    r"\s+" + _LOWER_SUFFIX
+    r"\s+" + _LOWER_SUFFIX +
     r"|"
     r"(?:above|over|at\s+least|>=)\s+"
     r"(?P<value2>-?\d+(?:\.\d+)?)"
@@ -71,7 +71,7 @@ _UPPER_RE = re.compile(
     r"(?:^|\s)"
     r"(?P<value>-?\d+(?:\.\d+)?)"
     + _TEMP_UNIT +
-    r"\s+" + _UPPER_SUFFIX
+    r"\s+" + _UPPER_SUFFIX +
     r"|"
     r"(?:below|under|at\s+most|<=)\s+"
     r"(?P<value2>-?\d+(?:\.\d+)?)"
