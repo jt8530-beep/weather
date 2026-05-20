@@ -13,6 +13,16 @@ from .orderbook import quote_buy, quote_sell
 from .types import Leg, Opportunity, OrderBook
 
 
+DEFAULT_ALLOWED_PAPER_KINDS = ",".join(
+    [
+        "YES_NO_BUY_BOTH",
+        "YES_NO_SPLIT_SELL_BOTH",
+        "NEGRISK_BUY_ALL_YES",
+        "NEGRISK_BUY_ALL_NO",
+    ]
+)
+
+
 @dataclass(frozen=True)
 class PaperLegResult:
     action: str
@@ -58,7 +68,7 @@ class PaperExecutor:
         max_book_age_ms: int = 500,
         min_edge: Decimal = Decimal("0.02"),
     ):
-        env_allowed = os.getenv("PM_ALLOW_KINDS", "YES_NO_BUY_BOTH")
+        env_allowed = os.getenv("PM_ALLOW_KINDS", DEFAULT_ALLOWED_PAPER_KINDS)
         if allowed_kinds is None:
             allowed_kinds = [item.strip() for item in env_allowed.split(",") if item.strip()]
         self.allowed_kinds = set(allowed_kinds)
@@ -84,6 +94,24 @@ class PaperExecutor:
         total_cost = Decimal("0")
         total_proceeds = Decimal("0")
         for leg in opportunity.legs:
+            if leg.action == "SPLIT":
+                total_cost += leg.size
+                residual.append(f"SPLIT:{leg.market_id}:{leg.size}")
+                leg_results.append(
+                    PaperLegResult(
+                        action=leg.action,
+                        outcome=leg.outcome,
+                        token_id=leg.token_id,
+                        requested_size=str(leg.size),
+                        filled_size=str(leg.size),
+                        avg_price=str(leg.avg_price or ""),
+                        fee=str(leg.fee),
+                        success=True,
+                        reason="paper_split_collateral",
+                    )
+                )
+                continue
+
             book = books.get(leg.token_id)
             if book is None:
                 leg_results.append(_failed_leg(leg, "missing_book"))
@@ -165,6 +193,8 @@ class PaperExecutor:
         if notional > self.max_notional_per_trade:
             return "notional_above_limit"
         for leg in opportunity.legs:
+            if leg.action == "SPLIT":
+                continue
             if leg.token_id not in books:
                 return "missing_book"
             if book_ages_ms is not None:
