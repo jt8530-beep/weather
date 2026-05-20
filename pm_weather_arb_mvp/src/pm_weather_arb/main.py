@@ -265,7 +265,7 @@ def run_paper(args: argparse.Namespace) -> int:
         print(
             f"TEMP_BUCKET_COMBO type=BUY_ALL_YES "
             f"sum_cost={sum_yes_ask:.4f} "
-            f"gross_edge={buy_yes_edge:.4f}" if buy_yes_edge is not None else f"gross_edge=na "
+            + (f"gross_edge={buy_yes_edge:.4f} " if buy_yes_edge is not None else f"gross_edge=na ")
             + f"required_legs={k} available_legs={yes_ask_count} "
             f"status={buy_yes_status} reason={buy_yes_reason}"
         )
@@ -285,7 +285,7 @@ def run_paper(args: argparse.Namespace) -> int:
         print(
             f"TEMP_BUCKET_COMBO type=BUY_ALL_NO "
             f"sum_cost={sum_no_ask:.4f} "
-            f"gross_edge={buy_no_edge:.4f}" if buy_no_edge is not None else f"gross_edge=na "
+            + (f"gross_edge={buy_no_edge:.4f} " if buy_no_edge is not None else f"gross_edge=na ")
             + f"required_legs={k} available_legs={no_ask_count} "
             f"status={buy_no_status} reason={buy_no_reason}"
         )
@@ -305,7 +305,7 @@ def run_paper(args: argparse.Namespace) -> int:
         print(
             f"TEMP_BUCKET_COMBO type=SELL_ALL_YES "
             f"sum_bid={sum_yes_bid:.4f} "
-            f"gross_edge={sell_yes_edge:.4f}" if sell_yes_edge is not None else f"gross_edge=na "
+            + (f"gross_edge={sell_yes_edge:.4f} " if sell_yes_edge is not None else f"gross_edge=na ")
             + f"required_legs={k} available_legs={yes_bid_count} "
             f"status={sell_yes_status} reason={sell_yes_reason}"
         )
@@ -325,7 +325,7 @@ def run_paper(args: argparse.Namespace) -> int:
         print(
             f"TEMP_BUCKET_COMBO type=SELL_ALL_NO "
             f"sum_bid={sum_no_bid:.4f} "
-            f"gross_edge={sell_no_edge:.4f}" if sell_no_edge is not None else f"gross_edge=na "
+            + (f"gross_edge={sell_no_edge:.4f} " if sell_no_edge is not None else f"gross_edge=na ")
             + f"required_legs={k} available_legs={no_bid_count} "
             f"status={sell_no_status} reason={sell_no_reason}"
         )
