@@ -188,41 +188,59 @@ def run_paper(args: argparse.Namespace) -> int:
         reasons_str = ",".join(f"{k}:{v}" for k, v in sorted(invalid_reasons.items()))
         print(f"temperature_bucket_events_checked={temp_checked} valid={temp_valid} invalid={temp_invalid} invalid_reasons={reasons_str}")
 
-    # V6: diagnostic for valid temperature bucket events → why not accepted?
+    # V6: diagnostic for valid temperature bucket events → per-bucket books + sum metrics
     for event_id, v in temp_validations.items():
         if not v.is_valid:
             continue
-        # Find NegRisk opportunities for this event
         event_opps = [opp for opp in opportunities if opp.event_id == event_id and opp.kind in ("NEGRISK_BUY_ALL_YES", "NEGRISK_BUY_ALL_NO")]
         bucket_range = f"[<={v.buckets[0].value}{v.unit}]" if v.buckets else ""
         for b in v.buckets:
             if b.kind == "lower":
                 bucket_range = f"[<={v.buckets[0].value}{v.unit} .. >={b.value}{v.unit}]"
                 break
-        sum_yes_cost = sum(float(opp.total_cost) for opp in event_opps) if event_opps else 0
-        max_edge = max((float(opp.edge_per_share) for opp in event_opps), default=0)
-        if event_opps:
-            for opp in event_opps[:1]:
-                print(
-                    f"TEMP_BUCKET_DIAG event={v.event_title[:60]} "
-                    f"range={bucket_range} "
-                    f"buckets={v.bucket_count} "
-                    f"unit={v.unit} "
-                    f"opportunities={len(event_opps)} "
-                    f"sum_yes_cost={sum_yes_cost:.4f} "
-                    f"max_edge={max_edge:.4f} "
-                    f"required_edge=0.005 "
-                    f"edge_gap={0.005 - max_edge:.4f}"
-                )
-        else:
-            print(
-                f"TEMP_BUCKET_DIAG event={v.event_title[:60]} "
-                f"range={bucket_range} "
-                f"buckets={v.bucket_count} "
-                f"unit={v.unit} "
-                f"opportunities=0 "
-                f"reason=scanner_did_not_produce_negrisk_opportunity"
-            )
+
+        # Per-bucket book snapshot
+        sum_yes_ask = 0.0
+        sum_yes_bid = 0.0
+        sum_no_ask = 0.0
+        sum_no_bid = 0.0
+        books_found = 0
+        missing_books = 0
+        for b in v.buckets:
+            yb = books.get(b.token_yes)
+            nb = books.get(b.token_no)
+            ya = float(yb.best_ask()) if yb and yb.best_ask() is not None else None
+            yb_p = float(yb.best_bid()) if yb and yb.best_bid() is not None else None
+            na = float(nb.best_ask()) if nb and nb.best_ask() is not None else None
+            nb_p = float(nb.best_bid()) if nb and nb.best_bid() is not None else None
+            has_book = (ya is not None and na is not None)
+            if has_book:
+                books_found += 1
+                sum_yes_ask += ya
+                if yb_p is not None:
+                    sum_yes_bid += yb_p
+                if na is not None:
+                    sum_no_ask += na
+                if nb_p is not None:
+                    sum_no_bid += nb_p
+            else:
+                missing_books += 1
+            ya_s = f"{ya:.4f}" if ya is not None else "none"
+            yb_s = f"{yb_p:.4f}" if yb_p is not None else "none"
+            na_s = f"{na:.4f}" if na is not None else "none"
+            nb_s = f"{nb_p:.4f}" if nb_p is not None else "none"
+            print(f"TEMP_BUCKET_BOOK bucket={b.kind}={b.value}{v.unit} yes_ask={ya_s} yes_bid={yb_s} no_ask={na_s} no_bid={nb_s}")
+
+        k = v.bucket_count
+        exhaustive = (k == (int(float(v.buckets[-1].value)) - int(float(v.buckets[0].value)) + 1))
+        print(
+            f"TEMP_BUCKET_SUM event={v.event_title[:60]} "
+            f"sum_yes_ask={sum_yes_ask:.4f} sum_yes_bid={sum_yes_bid:.4f} "
+            f"sum_no_ask={sum_no_ask:.4f} sum_no_bid={sum_no_bid:.4f} "
+            f"k={k} exhaustive={exhaustive} negrisk=True "
+            f"books_found={books_found} missing_books={missing_books} "
+            f"opportunities={len(event_opps)}"
+        )
 
     min_edge_by_kind = parse_kind_min_edges(getattr(args, "paper_min_edge_by_kind", ""))
     executor = PaperExecutor(
