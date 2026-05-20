@@ -188,6 +188,42 @@ def run_paper(args: argparse.Namespace) -> int:
         reasons_str = ",".join(f"{k}:{v}" for k, v in sorted(invalid_reasons.items()))
         print(f"temperature_bucket_events_checked={temp_checked} valid={temp_valid} invalid={temp_invalid} invalid_reasons={reasons_str}")
 
+    # V6: diagnostic for valid temperature bucket events → why not accepted?
+    for event_id, v in temp_validations.items():
+        if not v.is_valid:
+            continue
+        # Find NegRisk opportunities for this event
+        event_opps = [opp for opp in opportunities if opp.event_id == event_id and opp.kind in ("NEGRISK_BUY_ALL_YES", "NEGRISK_BUY_ALL_NO")]
+        bucket_range = f"[<={v.buckets[0].value}{v.unit}]" if v.buckets else ""
+        for b in v.buckets:
+            if b.kind == "lower":
+                bucket_range = f"[<={v.buckets[0].value}{v.unit} .. >={b.value}{v.unit}]"
+                break
+        sum_yes_cost = sum(float(opp.total_cost) for opp in event_opps) if event_opps else 0
+        max_edge = max((float(opp.edge_per_share) for opp in event_opps), default=0)
+        if event_opps:
+            for opp in event_opps[:1]:
+                print(
+                    f"TEMP_BUCKET_DIAG event={v.event_title[:60]} "
+                    f"range={bucket_range} "
+                    f"buckets={v.bucket_count} "
+                    f"unit={v.unit} "
+                    f"opportunities={len(event_opps)} "
+                    f"sum_yes_cost={sum_yes_cost:.4f} "
+                    f"max_edge={max_edge:.4f} "
+                    f"required_edge=0.005 "
+                    f"edge_gap={0.005 - max_edge:.4f}"
+                )
+        else:
+            print(
+                f"TEMP_BUCKET_DIAG event={v.event_title[:60]} "
+                f"range={bucket_range} "
+                f"buckets={v.bucket_count} "
+                f"unit={v.unit} "
+                f"opportunities=0 "
+                f"reason=scanner_did_not_produce_negrisk_opportunity"
+            )
+
     min_edge_by_kind = parse_kind_min_edges(getattr(args, "paper_min_edge_by_kind", ""))
     executor = PaperExecutor(
         max_notional_per_trade=Decimal(str(args.max_notional)),
