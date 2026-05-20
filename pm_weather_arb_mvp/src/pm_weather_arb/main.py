@@ -236,7 +236,6 @@ def build_parser() -> argparse.ArgumentParser:
     paper.add_argument("--max-notional", default="10")
     paper.add_argument("--max-book-age-ms", type=int, default=500)
     paper.add_argument("--paper-seen-keys", default="paper_logs/paper_seen_keys.txt")
-    paper.add_argument("--suspicious-negrisk-output", default="paper_logs/suspicious_negrisk.csv")
     paper.add_argument("--paper-csv", default="paper_logs/paper_executions.csv")
     paper.add_argument("--paper-jsonl", default="paper_logs/paper_executions.jsonl")
     paper.set_defaults(func=run_paper)
