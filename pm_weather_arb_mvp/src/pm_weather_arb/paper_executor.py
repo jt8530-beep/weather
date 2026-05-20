@@ -275,15 +275,15 @@ class PaperExecutor:
         books: Dict[str, OrderBook],
         book_ages_ms: Optional[Dict[str, int]],
     ) -> Optional[str]:
+        # V4/V5: NegRisk gate — only verified temperature bucket events pass this gate
+        if opportunity.kind in NEGRISK_KINDS:
+            validation = self.temperature_validations.get(opportunity.event_id)
+            if not (validation and validation.is_valid):
+                return "negrisk_disabled_requires_manual_verification"
+
         if opportunity.kind not in self.allowed_kinds:
-            if opportunity.kind in NEGRISK_KINDS:
-                # V5: Allow NegRisk if event is verified temperature bucket
-                validation = self.temperature_validations.get(opportunity.event_id)
-                if not (validation and validation.is_valid):
-                    return "negrisk_disabled_requires_manual_verification"
-                # verified temperature NegRisk: allow kind, but continue to run ALL downstream checks
-            else:
-                return f"kind_not_allowed:{opportunity.kind}"
+            return f"kind_not_allowed:{opportunity.kind}"
+
         required_edge = self._required_edge(opportunity.kind)
         if opportunity.edge_per_share < required_edge:
             return "edge_below_paper_min"
