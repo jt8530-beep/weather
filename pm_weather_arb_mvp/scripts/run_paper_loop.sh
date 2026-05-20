@@ -17,7 +17,6 @@ while true; do
     --min-edge "${PM_SCAN_MIN_EDGE:-0.005}"
     --paper-min-edge "${PM_PAPER_MIN_EDGE:-0.02}"
     --paper-min-edge-by-kind "${PM_PAPER_MIN_EDGE_BY_KIND:-YES_NO_BUY_BOTH=0.005,YES_NO_SPLIT_SELL_BOTH=0.005}"
-    --paper-kind-min-edge "${PM_KIND_MIN_EDGE:-}"
     --fee-rate "${PM_FEE_RATE:-0.05}"
     --max-notional "${PM_MAX_NOTIONAL_PER_TRADE:-10}"
     --output opportunities.csv

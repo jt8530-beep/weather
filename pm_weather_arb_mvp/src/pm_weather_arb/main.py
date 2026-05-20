@@ -75,9 +75,12 @@ def _load_markets_books(args: argparse.Namespace, config: Config) -> tuple[list[
         # 1. Search-term based discovery
         search_terms_raw = getattr(args, "temperature_search_terms", "") or ""
         search_terms = [t.strip() for t in search_terms_raw.split(",") if t.strip()]
+        search_limit = int(getattr(args, "temperature_search_limit", 100))
         if search_terms:
-            search_limit = int(getattr(args, "temperature_search_limit", 100))
             targeted_events = gamma.list_temperature_events(terms=search_terms, limit=search_limit)
+        else:
+            # No explicit terms provided: use default temperature search terms from gamma.py
+            targeted_events = gamma.list_temperature_events(terms=None, limit=search_limit)
 
         # 2. Explicit slug discovery
         slugs_raw = getattr(args, "target_event_slugs", "") or ""
