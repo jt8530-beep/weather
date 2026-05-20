@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Iterable, List, Optional
 
 import requests
@@ -9,10 +10,46 @@ from .types import Market, Token
 from .util import first_present, jsonish, norm_text, truthy
 
 
+DEFAULT_TEMPERATURE_SEARCH_TERMS = [
+    "highest temperature",
+    "lowest temperature",
+    "temperature",
+    "Seoul temperature",
+    "Tokyo temperature",
+    "New York temperature",
+    "Miami temperature",
+    "Chicago temperature",
+    "Los Angeles temperature",
+    "San Francisco temperature",
+    "London temperature",
+    "Paris temperature",
+]
+
+TEMPERATURE_EVENT_TITLE_KW = [
+    "highest temperature",
+    "lowest temperature",
+    "temperature",
+    "high temp",
+    "low temp",
+]
+
+
 class GammaClient:
     def __init__(self, config: Config):
         self.config = config
         self.session = requests.Session()
+
+    def list_events_raw(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Call /events with arbitrary params, return the events list."""
+        url = f"{self.config.gamma_host.rstrip('/')}/events"
+        resp = self.session.get(url, params=params, timeout=self.config.http_timeout)
+        resp.raise_for_status()
+        payload = resp.json()
+        if isinstance(payload, dict) and "events" in payload:
+            return payload["events"]
+        if isinstance(payload, list):
+            return payload
+        return []
 
     def list_active_events(
         self,
@@ -23,7 +60,7 @@ class GammaClient:
     ) -> List[Dict[str, Any]]:
         events: List[Dict[str, Any]] = []
         for page in range(pages):
-            params = {
+            params: Dict[str, Any] = {
                 "active": "true",
                 "closed": "false",
                 "limit": limit,
@@ -31,19 +68,82 @@ class GammaClient:
                 "order": order,
                 "ascending": str(ascending).lower(),
             }
-            url = f"{self.config.gamma_host.rstrip('/')}/events"
-            resp = self.session.get(url, params=params, timeout=self.config.http_timeout)
-            resp.raise_for_status()
-            payload = resp.json()
-            if isinstance(payload, dict) and "events" in payload:
-                batch = payload["events"]
-            else:
-                batch = payload
+            batch = self.list_events_raw(params)
             if not batch:
                 break
             events.extend(batch)
             if len(batch) < limit:
                 break
+        return events
+
+    def list_temperature_events(
+        self,
+        terms: Optional[List[str]] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Discover temperature events by probing search-like params."""
+        if terms is None:
+            terms = DEFAULT_TEMPERATURE_SEARCH_TERMS
+
+        search_param_names = ["search", "q", "query"]
+        seen_ids: set[str] = set()
+        events: List[Dict[str, Any]] = []
+
+        for term in terms:
+            for param_name in search_param_names:
+                try:
+                    batch = self.list_events_raw({
+                        "active": "true",
+                        "closed": "false",
+                        "limit": limit,
+                        param_name: term,
+                    })
+                except Exception:
+                    continue
+                if not batch:
+                    continue
+                for evt in batch:
+                    eid = str(first_present(evt, "id", "eventId", default=""))
+                    if not eid or eid in seen_ids:
+                        continue
+                    # Secondary filter: must be temperature event
+                    title = str(first_present(evt, "title", "question", default="")).lower()
+                    if not any(kw in title for kw in TEMPERATURE_EVENT_TITLE_KW):
+                        continue
+                    seen_ids.add(eid)
+                    events.append(evt)
+
+        return events
+
+    def list_events_by_slugs(self, slugs: List[str]) -> List[Dict[str, Any]]:
+        """Fetch events by explicit slug list. Failures are silent."""
+        seen_ids: set[str] = set()
+        events: List[Dict[str, Any]] = []
+        for slug in slugs:
+            slug = slug.strip()
+            if not slug:
+                continue
+            try:
+                batch = self.list_events_raw({"slug": slug})
+            except Exception:
+                continue
+            if not batch:
+                # Fallback: try search with the slug
+                try:
+                    batch = self.list_events_raw({
+                        "active": "true",
+                        "closed": "false",
+                        "search": slug,
+                        "limit": 10,
+                    })
+                except Exception:
+                    continue
+            for evt in batch:
+                eid = str(first_present(evt, "id", "eventId", default=""))
+                if not eid or eid in seen_ids:
+                    continue
+                seen_ids.add(eid)
+                events.append(evt)
         return events
 
 

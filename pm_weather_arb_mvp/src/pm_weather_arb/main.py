@@ -28,6 +28,7 @@ from .scanners import scan_all
 from .suspicious_negrisk import write_suspicious_negrisk_csv
 from .temperature_buckets import TemperatureBucketValidation, validate_all_temperature_events
 from .types import Market, OrderBook
+from .util import first_present
 
 
 def _token_ids(markets: Iterable[Market]) -> List[str]:
@@ -61,13 +62,53 @@ def _load_markets_books(args: argparse.Namespace, config: Config) -> tuple[list[
         return _load_fixture(args.fixture)
     gamma = GammaClient(config)
     clob = ClobPublicClient(config)
-    events = gamma.list_active_events(pages=args.pages, limit=args.limit, order=args.order)
+
+    # V6: volume scan + targeted temperature discovery + slug fallback
+    volume_events = gamma.list_active_events(pages=args.pages, limit=args.limit, order=args.order)
+    volume_count = len(volume_events)
+
+    targeted_temperature_enabled = bool(getattr(args, "target_temperature_events", False))
+    targeted_events: list = []
+    targeted_temp_count = 0
+
+    if targeted_temperature_enabled:
+        # 1. Search-term based discovery
+        search_terms_raw = getattr(args, "temperature_search_terms", "") or ""
+        search_terms = [t.strip() for t in search_terms_raw.split(",") if t.strip()]
+        if search_terms:
+            search_limit = int(getattr(args, "temperature_search_limit", 100))
+            targeted_events = gamma.list_temperature_events(terms=search_terms, limit=search_limit)
+
+        # 2. Explicit slug discovery
+        slugs_raw = getattr(args, "target_event_slugs", "") or ""
+        slugs = [s.strip() for s in slugs_raw.split(",") if s.strip()]
+        if slugs:
+            slug_events = gamma.list_events_by_slugs(slugs)
+            targeted_events.extend(slug_events)
+
+        targeted_temp_count = len(targeted_events)
+
+    # Merge by event_id, dedupe
+    events_by_id: dict[str, dict] = {}
+    for event in volume_events + targeted_events:
+        event_id = str(first_present(event, "id", "eventId", default=""))
+        if event_id:
+            events_by_id[event_id] = event
+    events = list(events_by_id.values())
+
     weather_only = bool(getattr(args, "weather_only", False)) and not bool(getattr(args, "all_markets", False))
     markets = parse_markets_from_events(events, only_weatherish=weather_only)
     token_ids = _token_ids(markets)
     binary_markets = sum(1 for market in markets if market.yes_token and market.no_token)
     scope = "weather" if weather_only else "all"
-    print(f"events={len(events)} raw_markets={len(markets)} binary_markets={binary_markets} tokens={len(token_ids)} market_scope={scope}")
+    print(
+        f"events_volume={volume_count} "
+        f"events_targeted_temperature={targeted_temp_count} "
+        f"events_merged={len(events)} "
+        f"targeted_temperature_enabled={targeted_temperature_enabled} "
+        f"raw_markets={len(markets)} binary_markets={binary_markets} "
+        f"tokens={len(token_ids)} market_scope={scope}"
+    )
     books = clob.get_books(token_ids, batch_size=args.book_batch_size) if token_ids else {}
     return markets, books
 
@@ -218,6 +259,10 @@ def _add_scan_args(scan: argparse.ArgumentParser) -> None:
     scan.add_argument("--near-miss-output", default="near_misses.csv")
     scan.add_argument("--near-miss-top", type=int, default=50)
     scan.add_argument("--suspicious-negrisk-output", default="paper_logs/suspicious_negrisk.csv")
+    scan.add_argument("--target-temperature-events", action="store_true", help="enable targeted temperature event discovery via search terms and slugs")
+    scan.add_argument("--temperature-search-terms", default="", help="comma-separated search terms, e.g. 'highest temperature,lowest temperature'")
+    scan.add_argument("--temperature-search-limit", type=int, default=100, help="limit per search term")
+    scan.add_argument("--target-event-slugs", default="", help="comma-separated event slugs to explicitly fetch")
 
 
 def build_parser() -> argparse.ArgumentParser:

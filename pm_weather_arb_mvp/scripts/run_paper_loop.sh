@@ -33,6 +33,19 @@ while true; do
     args+=(--enable-negrisk-paper)
   fi
 
+  if [[ "${PM_TARGET_TEMPERATURE_EVENTS:-true}" == "true" ]]; then
+    args+=(--target-temperature-events)
+  fi
+  if [[ -n "${PM_TEMPERATURE_SEARCH_TERMS:-}" ]]; then
+    args+=(--temperature-search-terms "$PM_TEMPERATURE_SEARCH_TERMS")
+  fi
+  if [[ -n "${PM_TEMPERATURE_SEARCH_LIMIT:-}" ]]; then
+    args+=(--temperature-search-limit "$PM_TEMPERATURE_SEARCH_LIMIT")
+  fi
+  if [[ -n "${PM_TARGET_EVENT_SLUGS:-}" ]]; then
+    args+=(--target-event-slugs "$PM_TARGET_EVENT_SLUGS")
+  fi
+
   PM_ALLOW_KINDS="${PM_ALLOW_KINDS:-YES_NO_BUY_BOTH,YES_NO_SPLIT_SELL_BOTH}" \
     PYTHONPATH=src python -m pm_weather_arb paper "${args[@]}" 2>&1 | tee -a "$LOG_DIR/paper_stdout.log"
   sleep "$SLEEP_SECONDS"
