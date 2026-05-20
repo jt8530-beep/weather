@@ -9,7 +9,7 @@ from pm_weather_arb.types import BookLevel, Market, OrderBook, Token
 from pm_weather_arb.ws_market import MarketBookCache
 
 
-def market(event_id: str, market_id: str, question: str, yes: str, no: str) -> Market:
+def market(event_id: str, market_id: str, question: str, yes: str, no: str, neg: bool = False) -> Market:
     return Market(
         event_id=event_id,
         event_slug=f"event-{event_id}",
@@ -19,7 +19,7 @@ def market(event_id: str, market_id: str, question: str, yes: str, no: str) -> M
         question=question,
         description="",
         condition_id=f"cond-{market_id}",
-        neg_risk=False,
+        neg_risk=neg,
         enable_order_book=True,
         active=True,
         closed=False,
@@ -58,6 +58,23 @@ class PaperAndWsTests(unittest.TestCase):
         )
         self.assertTrue(result.accepted)
         self.assertEqual(result.legs[0].reason, "paper_split_collateral")
+
+    def test_paper_rejects_negrisk_by_default(self):
+        m1 = market("e2", "m1", "Outcome A", "YA", "NA", neg=True)
+        m2 = market("e2", "m2", "Outcome B", "YB", "NB", neg=True)
+        books = {
+            "YA": book("YA", asks=[("0.20", "50")]),
+            "YB": book("YB", asks=[("0.30", "50")]),
+            "NA": book("NA"),
+            "NB": book("NB"),
+        }
+        opps = scan_all([m1, m2], books, Decimal("0"), Decimal("0.005"), Decimal("5"), Decimal("20"))
+        opp = next(o for o in opps if o.kind == "NEGRISK_BUY_ALL_YES")
+        result = PaperExecutor(max_notional_per_trade=Decimal("20"), min_edge=Decimal("0.02")).simulate(
+            opp, books, Decimal("0")
+        )
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.reason, "negrisk_disabled_requires_manual_verification")
 
     def test_ws_price_change_updates_book(self):
         cache = MarketBookCache()

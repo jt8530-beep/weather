@@ -17,10 +17,10 @@ DEFAULT_ALLOWED_PAPER_KINDS = ",".join(
     [
         "YES_NO_BUY_BOTH",
         "YES_NO_SPLIT_SELL_BOTH",
-        "NEGRISK_BUY_ALL_YES",
-        "NEGRISK_BUY_ALL_NO",
     ]
 )
+NEGRISK_KINDS = {"NEGRISK_BUY_ALL_YES", "NEGRISK_BUY_ALL_NO"}
+KEY_PRICE_PRECISION = Decimal("0.0001")
 
 
 @dataclass(frozen=True)
@@ -67,6 +67,7 @@ class PaperExecutor:
         max_notional_per_trade: Decimal = Decimal("10"),
         max_book_age_ms: int = 500,
         min_edge: Decimal = Decimal("0.02"),
+        per_kind_min_edge: Optional[Dict[str, Decimal]] = None,
     ):
         env_allowed = os.getenv("PM_ALLOW_KINDS", DEFAULT_ALLOWED_PAPER_KINDS)
         if allowed_kinds is None:
@@ -75,6 +76,7 @@ class PaperExecutor:
         self.max_notional_per_trade = max_notional_per_trade
         self.max_book_age_ms = max_book_age_ms
         self.min_edge = min_edge
+        self.per_kind_min_edge = per_kind_min_edge or parse_kind_min_edges(os.getenv("PM_KIND_MIN_EDGE", ""))
 
     def simulate(
         self,
@@ -186,8 +188,11 @@ class PaperExecutor:
         book_ages_ms: Optional[Dict[str, int]],
     ) -> Optional[str]:
         if opportunity.kind not in self.allowed_kinds:
+            if opportunity.kind in NEGRISK_KINDS:
+                return "negrisk_disabled_requires_manual_verification"
             return f"kind_not_allowed:{opportunity.kind}"
-        if opportunity.edge_per_share < self.min_edge:
+        required_edge = self.per_kind_min_edge.get(opportunity.kind, self.min_edge)
+        if opportunity.edge_per_share < required_edge:
             return "edge_below_paper_min"
         notional = opportunity.total_cost if opportunity.total_cost > 0 else opportunity.total_proceeds
         if notional > self.max_notional_per_trade:
@@ -243,6 +248,95 @@ def _failed_leg(leg: Leg, reason: str) -> PaperLegResult:
         success=False,
         reason=reason,
     )
+
+
+def parse_kind_min_edges(raw: str) -> Dict[str, Decimal]:
+    out: Dict[str, Decimal] = {}
+    for item in raw.split(","):
+        item = item.strip()
+        if not item or "=" not in item:
+            continue
+        kind, value = item.split("=", 1)
+        kind = kind.strip()
+        value = value.strip()
+        if not kind or not value:
+            continue
+        out[kind] = Decimal(value)
+    return out
+
+
+def _rounded_price(value: str | Decimal | None) -> str:
+    if value in (None, ""):
+        return ""
+    return str(Decimal(str(value)).quantize(KEY_PRICE_PRECISION))
+
+
+def paper_opportunity_key(opportunity: Opportunity) -> str:
+    leg_parts = []
+    for leg in opportunity.legs:
+        if leg.action == "SPLIT":
+            continue
+        leg_parts.append(
+            "|".join(
+                [
+                    leg.action,
+                    leg.token_id,
+                    str(leg.size),
+                    _rounded_price(leg.avg_price),
+                ]
+            )
+        )
+    return "||".join([opportunity.kind, opportunity.event_id, *sorted(leg_parts)])
+
+
+def paper_row_key(row: dict[str, str]) -> str:
+    try:
+        legs = json.loads(row.get("legs") or "[]")
+    except json.JSONDecodeError:
+        legs = []
+    leg_parts = []
+    for leg in legs:
+        if not isinstance(leg, dict) or leg.get("action") == "SPLIT":
+            continue
+        leg_parts.append(
+            "|".join(
+                [
+                    str(leg.get("action") or ""),
+                    str(leg.get("token_id") or ""),
+                    str(leg.get("requested_size") or ""),
+                    _rounded_price(leg.get("avg_price") or ""),
+                ]
+            )
+        )
+    return "||".join([row.get("kind", ""), row.get("event_id", ""), *sorted(leg_parts)])
+
+
+def load_seen_paper_keys(path: str | Path, existing_csv: str | Path | None = None) -> set[str]:
+    seen_path = Path(path)
+    seen: set[str] = set()
+    if seen_path.exists():
+        seen.update(line.strip() for line in seen_path.read_text(encoding="utf-8").splitlines() if line.strip())
+    if existing_csv:
+        csv_path = Path(existing_csv)
+        if csv_path.exists():
+            with csv_path.open(newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    if str(row.get("accepted", "")).lower() == "true":
+                        key = paper_row_key(row)
+                        if key:
+                            seen.add(key)
+    return seen
+
+
+def append_seen_paper_keys(keys: Iterable[str], path: str | Path) -> None:
+    key_list = [key for key in keys if key]
+    if not key_list:
+        return
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("a", encoding="utf-8") as f:
+        for key in key_list:
+            f.write(key + "\n")
 
 
 def append_jsonl(results: Iterable[PaperExecutionResult], path: str | Path) -> None:
