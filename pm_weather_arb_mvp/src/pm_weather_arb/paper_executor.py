@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import time
 from dataclasses import asdict, dataclass
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .orderbook import quote_buy, quote_sell
 from .temperature_buckets import TemperatureBucketValidation
@@ -22,6 +23,64 @@ DEFAULT_ALLOWED_PAPER_KINDS = ",".join(
 )
 NEGRISK_KINDS = {"NEGRISK_BUY_ALL_YES", "NEGRISK_BUY_ALL_NO"}
 KEY_PRICE_PRECISION = Decimal("0.0001")
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def parse_kind_decimal_map(spec: str | None) -> Dict[str, Decimal]:
+    out: Dict[str, Decimal] = {}
+    if not spec:
+        return out
+    for item in spec.split(","):
+        item = item.strip()
+        if not item or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            continue
+        out[key] = Decimal(value)
+    return out
+
+
+def _q_decimal(value: Decimal | None, places: str = "0.0001") -> str:
+    if value is None:
+        return ""
+    return str(value.quantize(Decimal(places), rounding=ROUND_HALF_UP))
+
+
+def opportunity_key(opportunity: Opportunity) -> str:
+    leg_bits = []
+    for leg in sorted(opportunity.legs, key=lambda x: (x.action, x.market_id, x.outcome, x.token_id)):
+        leg_bits.append(
+            ":".join(
+                [
+                    leg.action,
+                    leg.outcome,
+                    leg.market_id,
+                    leg.token_id,
+                    _q_decimal(leg.size, "0.0001"),
+                    _q_decimal(leg.avg_price, "0.0001"),
+                ]
+            )
+        )
+    payload = "|".join(
+        [
+            opportunity.kind,
+            opportunity.event_id,
+            _q_decimal(opportunity.size, "0.0001"),
+            _q_decimal(opportunity.edge_per_share, "0.0001"),
+            ";".join(leg_bits),
+        ]
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+    return f"{opportunity.kind}:{opportunity.event_id}:{digest}"
 
 
 @dataclass(frozen=True)
@@ -51,6 +110,8 @@ class PaperExecutionResult:
     total_cost: str
     total_proceeds: str
     residual_tokens: str
+    opportunity_key: str
+    duplicate: bool
     verification_status: str
     verification_reason: str
     verification_bucket_count: str
@@ -61,9 +122,12 @@ class PaperExecutionResult:
 class PaperExecutor:
     """Paper execution harness for opportunity objects.
 
-    This class intentionally does not sign orders. It simulates whether the current
-    local book can satisfy the opportunity legs under FOK-style rules and records
-    residual exposure if a later leg fails.
+    V4 guardrails:
+    - NegRisk paper acceptance is disabled by default, even if PM_ALLOW_KINDS includes it.
+    - Per-kind paper edge thresholds are supported through PM_PAPER_MIN_EDGE_BY_KIND.
+    - Each result carries a stable opportunity_key for persistent de-duplication.
+
+    V5: verified temperature NegRisk events may be accepted.
     """
 
     def __init__(
@@ -72,17 +136,22 @@ class PaperExecutor:
         max_notional_per_trade: Decimal = Decimal("10"),
         max_book_age_ms: int = 500,
         min_edge: Decimal = Decimal("0.02"),
-        per_kind_min_edge: Optional[Dict[str, Decimal]] = None,
+        min_edge_by_kind: Optional[Dict[str, Decimal]] = None,
+        enable_negrisk_paper: bool | None = None,
         temperature_validations: Optional[Dict[str, TemperatureBucketValidation]] = None,
     ):
-        env_allowed = os.getenv("PM_ALLOW_KINDS", DEFAULT_ALLOWED_PAPER_KINDS)
+        env_allowed = os.getenv("PM_ALLOW_KINDS", "YES_NO_BUY_BOTH,YES_NO_SPLIT_SELL_BOTH")
         if allowed_kinds is None:
             allowed_kinds = [item.strip() for item in env_allowed.split(",") if item.strip()]
         self.allowed_kinds = set(allowed_kinds)
         self.max_notional_per_trade = max_notional_per_trade
         self.max_book_age_ms = max_book_age_ms
         self.min_edge = min_edge
-        self.per_kind_min_edge = per_kind_min_edge or parse_kind_min_edges(os.getenv("PM_KIND_MIN_EDGE", ""))
+        self.min_edge_by_kind = dict(min_edge_by_kind or {})
+        self.min_edge_by_kind.update(parse_kind_decimal_map(os.getenv("PM_PAPER_MIN_EDGE_BY_KIND")))
+        if enable_negrisk_paper is None:
+            enable_negrisk_paper = _env_bool("PM_ENABLE_NEGRISK_PAPER", False)
+        self.enable_negrisk_paper = enable_negrisk_paper
         self.temperature_validations = temperature_validations or {}
 
     def simulate(
@@ -170,8 +239,6 @@ class PaperExecutor:
                 leg_results.append(_failed_leg(leg, "unsupported_leg_action"))
                 return self._result(ts_ms, opportunity, False, "unsupported_leg_action", leg_results, residual)
 
-        # For accepted opportunities, residual is expected until the paired set is merged or settled.
-        # It is still logged explicitly so a future live executor can enforce residual limits.
         v = self.temperature_validations.get(opportunity.event_id)
         v_status = "verified" if (v and v.is_valid) else "unverified"
         v_reason = v.reason if v else ""
@@ -190,12 +257,17 @@ class PaperExecutor:
             total_cost=str(total_cost),
             total_proceeds=str(total_proceeds),
             residual_tokens=" | ".join(residual),
+            opportunity_key=opportunity_key(opportunity),
+            duplicate=False,
             verification_status=v_status,
             verification_reason=v_reason,
             verification_bucket_count=v_bucket_count,
             verification_unit=v_unit,
             legs=leg_results,
         )
+
+    def _required_edge(self, kind: str) -> Decimal:
+        return self.min_edge_by_kind.get(kind, self.min_edge)
 
     def _precheck(
         self,
@@ -205,13 +277,14 @@ class PaperExecutor:
     ) -> Optional[str]:
         if opportunity.kind not in self.allowed_kinds:
             if opportunity.kind in NEGRISK_KINDS:
+                # V5: Allow NegRisk if event is verified temperature bucket
                 validation = self.temperature_validations.get(opportunity.event_id)
                 if not (validation and validation.is_valid):
                     return "negrisk_disabled_requires_manual_verification"
                 # verified temperature NegRisk: allow kind, but continue to run ALL downstream checks
             else:
                 return f"kind_not_allowed:{opportunity.kind}"
-        required_edge = self.per_kind_min_edge.get(opportunity.kind, self.min_edge)
+        required_edge = self._required_edge(opportunity.kind)
         if opportunity.edge_per_share < required_edge:
             return "edge_below_paper_min"
         notional = opportunity.total_cost if opportunity.total_cost > 0 else opportunity.total_proceeds
@@ -257,6 +330,8 @@ class PaperExecutor:
             total_cost=str(opportunity.total_cost),
             total_proceeds=str(opportunity.total_proceeds),
             residual_tokens=" | ".join(residual),
+            opportunity_key=opportunity_key(opportunity),
+            duplicate=False,
             verification_status=v_status,
             verification_reason=v_reason,
             verification_bucket_count=v_bucket_count,
@@ -293,6 +368,78 @@ def parse_kind_min_edges(raw: str) -> Dict[str, Decimal]:
         out[kind] = Decimal(value)
     return out
 
+
+# ---------------------------------------------------------------------------
+# De-duplication
+# ---------------------------------------------------------------------------
+
+class SeenOpportunityStore:
+    def __init__(self, path: str | Path | None):
+        self.path = Path(path) if path else None
+        self.seen: set[str] = set()
+        if self.path and self.path.exists():
+            self.seen = {line.strip() for line in self.path.read_text(encoding="utf-8").splitlines() if line.strip()}
+
+    def is_seen(self, key: str) -> bool:
+        return key in self.seen
+
+    def mark_seen(self, key: str) -> None:
+        if key in self.seen:
+            return
+        self.seen.add(key)
+        if self.path:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(key + "\n")
+
+
+def apply_dedup(
+    results: Iterable[PaperExecutionResult],
+    store: SeenOpportunityStore,
+    accepted_only: bool = True,
+) -> Tuple[List[PaperExecutionResult], int]:
+    out: List[PaperExecutionResult] = []
+    duplicates = 0
+    for result in results:
+        if accepted_only and not result.accepted:
+            out.append(result)
+            continue
+        if store.is_seen(result.opportunity_key):
+            duplicates += 1
+            out.append(_replace_duplicate(result))
+            continue
+        store.mark_seen(result.opportunity_key)
+        out.append(result)
+    return out, duplicates
+
+
+def _replace_duplicate(result: PaperExecutionResult) -> PaperExecutionResult:
+    return PaperExecutionResult(
+        ts_ms=result.ts_ms,
+        kind=result.kind,
+        event_id=result.event_id,
+        event_title=result.event_title,
+        accepted=False,
+        reason="duplicate_observation_not_counted",
+        requested_size=result.requested_size,
+        estimated_profit=result.estimated_profit,
+        estimated_edge_per_share=result.estimated_edge_per_share,
+        total_cost=result.total_cost,
+        total_proceeds=result.total_proceeds,
+        residual_tokens=result.residual_tokens,
+        opportunity_key=result.opportunity_key,
+        duplicate=True,
+        verification_status=result.verification_status,
+        verification_reason=result.verification_reason,
+        verification_bucket_count=result.verification_bucket_count,
+        verification_unit=result.verification_unit,
+        legs=result.legs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# CSV / JSONL / Seen Keys
+# ---------------------------------------------------------------------------
 
 def _rounded_price(value: str | Decimal | None) -> str:
     if value in (None, ""):
@@ -393,6 +540,8 @@ def append_csv(results: Iterable[PaperExecutionResult], path: str | Path) -> Non
         "total_cost",
         "total_proceeds",
         "residual_tokens",
+        "opportunity_key",
+        "duplicate",
         "verification_status",
         "verification_reason",
         "verification_bucket_count",
