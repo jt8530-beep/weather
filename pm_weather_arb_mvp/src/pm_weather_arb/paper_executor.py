@@ -53,6 +53,8 @@ class PaperExecutionResult:
     residual_tokens: str
     verification_status: str
     verification_reason: str
+    verification_bucket_count: str
+    verification_unit: str
     legs: List[PaperLegResult]
 
 
@@ -173,6 +175,8 @@ class PaperExecutor:
         v = self.temperature_validations.get(opportunity.event_id)
         v_status = "verified" if (v and v.is_valid) else "unverified"
         v_reason = v.reason if v else ""
+        v_bucket_count = str(v.bucket_count) if v else "0"
+        v_unit = v.unit if v else "unknown"
         return PaperExecutionResult(
             ts_ms=ts_ms,
             kind=opportunity.kind,
@@ -188,6 +192,8 @@ class PaperExecutor:
             residual_tokens=" | ".join(residual),
             verification_status=v_status,
             verification_reason=v_reason,
+            verification_bucket_count=v_bucket_count,
+            verification_unit=v_unit,
             legs=leg_results,
         )
 
@@ -199,12 +205,12 @@ class PaperExecutor:
     ) -> Optional[str]:
         if opportunity.kind not in self.allowed_kinds:
             if opportunity.kind in NEGRISK_KINDS:
-                # V5: Allow NegRisk if event is verified temperature bucket
                 validation = self.temperature_validations.get(opportunity.event_id)
-                if validation and validation.is_valid:
-                    return None  # accept — pass through to execution
-                return "negrisk_disabled_requires_manual_verification"
-            return f"kind_not_allowed:{opportunity.kind}"
+                if not (validation and validation.is_valid):
+                    return "negrisk_disabled_requires_manual_verification"
+                # verified temperature NegRisk: allow kind, but continue to run ALL downstream checks
+            else:
+                return f"kind_not_allowed:{opportunity.kind}"
         required_edge = self.per_kind_min_edge.get(opportunity.kind, self.min_edge)
         if opportunity.edge_per_share < required_edge:
             return "edge_below_paper_min"
@@ -236,6 +242,8 @@ class PaperExecutor:
         v = self.temperature_validations.get(opportunity.event_id)
         v_status = "verified" if (v and v.is_valid) else "unverified"
         v_reason = v.reason if v else reason
+        v_bucket_count = str(v.bucket_count) if v else "0"
+        v_unit = v.unit if v else "unknown"
         return PaperExecutionResult(
             ts_ms=ts_ms,
             kind=opportunity.kind,
@@ -251,6 +259,8 @@ class PaperExecutor:
             residual_tokens=" | ".join(residual),
             verification_status=v_status,
             verification_reason=v_reason,
+            verification_bucket_count=v_bucket_count,
+            verification_unit=v_unit,
             legs=leg_results,
         )
 
@@ -385,6 +395,8 @@ def append_csv(results: Iterable[PaperExecutionResult], path: str | Path) -> Non
         "residual_tokens",
         "verification_status",
         "verification_reason",
+        "verification_bucket_count",
+        "verification_unit",
         "legs",
     ]
     with out.open("a", newline="", encoding="utf-8") as f:

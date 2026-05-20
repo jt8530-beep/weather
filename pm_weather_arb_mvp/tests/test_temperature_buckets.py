@@ -427,3 +427,96 @@ class TestIsIntegralDecimal(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# V5 blocker: verified temperature NegRisk must still pass all downstream checks
+# ---------------------------------------------------------------------------
+
+from pm_weather_arb.paper_executor import PaperExecutor
+from pm_weather_arb.types import BookLevel, Leg, Opportunity, OrderBook
+
+
+def _make_opp(kind="NEGRISK_BUY_ALL_YES", event_id="e10", edge="0.03", notional="8"):
+    return Opportunity(
+        kind=kind,
+        event_id=event_id,
+        event_title="Highest temperature in Seoul on May 21?",
+        legs=[
+            Leg("BUY", "YES", "m0", "12C or below", "Y0", "ask", Decimal("5"), Decimal("0.45"), Decimal("0")),
+            Leg("BUY", "YES", "m1", "13C", "Y1", "ask", Decimal("5"), Decimal("0.50"), Decimal("0")),
+        ],
+        size=Decimal("5"),
+        min_payout=Decimal("5"),
+        total_cost=Decimal(notional),
+        total_proceeds=Decimal("0"),
+        expected_profit=Decimal("0.25"),
+        edge_per_share=Decimal(edge),
+        notes="test",
+    )
+
+
+def _make_books(*token_pairs):
+    books = {}
+    for tid, ask_price, ask_size in token_pairs:
+        books[tid] = OrderBook(
+            token_id=tid,
+            bids=[],
+            asks=[BookLevel(Decimal(str(ask_price)), Decimal(str(ask_size)))],
+        )
+    return books
+
+
+class TestVerifiedNegRiskStillChecksEdge(unittest.TestCase):
+    def test_edge_below_min_rejected(self):
+        opp = _make_opp(edge="0.001")
+        books = _make_books(("Y0", "0.45", "10"), ("Y1", "0.50", "10"))
+        temp_validations = {
+            "e10": TemperatureBucketValidation("e10", "Highest temperature in Seoul on May 21?", True, "valid_temperature_bucket_event", "C", 5, Decimal("13"), Decimal("14"), [])
+        }
+        executor = PaperExecutor(
+            allowed_kinds=["NEGRISK_BUY_ALL_YES"],
+            min_edge=Decimal("0.02"),
+            temperature_validations=temp_validations,
+            max_notional_per_trade=Decimal("100"),
+        )
+        result = executor.simulate(opp, books, Decimal("0"))
+        self.assertFalse(result.accepted)
+        self.assertIn("edge_below_paper_min", result.reason)
+
+
+class TestVerifiedNegRiskStillChecksNotional(unittest.TestCase):
+    def test_notional_above_limit_rejected(self):
+        opp = _make_opp(notional="50")
+        books = _make_books(("Y0", "0.45", "10"), ("Y1", "0.50", "10"))
+        temp_validations = {
+            "e10": TemperatureBucketValidation("e10", "Highest temperature in Seoul on May 21?", True, "valid_temperature_bucket_event", "C", 5, Decimal("13"), Decimal("14"), [])
+        }
+        executor = PaperExecutor(
+            allowed_kinds=["NEGRISK_BUY_ALL_YES"],
+            min_edge=Decimal("0.01"),
+            temperature_validations=temp_validations,
+            max_notional_per_trade=Decimal("10"),
+        )
+        result = executor.simulate(opp, books, Decimal("0"))
+        self.assertFalse(result.accepted)
+        self.assertIn("notional_above_limit", result.reason)
+
+
+class TestVerifiedNegRiskStillChecksStaleBook(unittest.TestCase):
+    def test_stale_book_rejected(self):
+        opp = _make_opp(edge="0.05")
+        books = _make_books(("Y0", "0.45", "10"), ("Y1", "0.50", "10"))
+        temp_validations = {
+            "e10": TemperatureBucketValidation("e10", "Highest temperature in Seoul on May 21?", True, "valid_temperature_bucket_event", "C", 5, Decimal("13"), Decimal("14"), [])
+        }
+        executor = PaperExecutor(
+            allowed_kinds=["NEGRISK_BUY_ALL_YES"],
+            min_edge=Decimal("0.01"),
+            temperature_validations=temp_validations,
+            max_notional_per_trade=Decimal("100"),
+            max_book_age_ms=100,
+        )
+        result = executor.simulate(opp, books, Decimal("0"), book_ages_ms={"Y0": 600, "Y1": 600})
+        self.assertFalse(result.accepted)
+        self.assertIn("stale_book", result.reason)
