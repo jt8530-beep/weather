@@ -189,6 +189,14 @@ def run_paper(args: argparse.Namespace) -> int:
         print(f"temperature_bucket_events_checked={temp_checked} valid={temp_valid} invalid={temp_invalid} invalid_reasons={reasons_str}")
 
     # V6: diagnostic for valid temperature bucket events → four-way combo scoring
+    combo_checked = 0
+    combo_profitable = 0
+    combo_guarded = 0
+    combo_rejected = 0
+    combo_best_type = ""
+    combo_best_edge = float("-inf")
+    combo_best_event = ""
+
     for event_id, v in temp_validations.items():
         if not v.is_valid:
             continue
@@ -269,6 +277,14 @@ def run_paper(args: argparse.Namespace) -> int:
             + f"required_legs={k} available_legs={yes_ask_count} "
             f"status={buy_yes_status} reason={buy_yes_reason}"
         )
+        combo_checked += 1
+        if buy_yes_status == "profitable": combo_profitable += 1
+        elif buy_yes_status == "guarded": combo_guarded += 1
+        else: combo_rejected += 1
+        if buy_yes_edge is not None and buy_yes_edge > combo_best_edge:
+            combo_best_edge = buy_yes_edge
+            combo_best_type = "BUY_ALL_YES"
+            combo_best_event = v.event_title
 
         # BUY_ALL_NO
         buy_no_full = (no_ask_count == k)
@@ -289,6 +305,14 @@ def run_paper(args: argparse.Namespace) -> int:
             + f"required_legs={k} available_legs={no_ask_count} "
             f"status={buy_no_status} reason={buy_no_reason}"
         )
+        combo_checked += 1
+        if buy_no_status == "profitable": combo_profitable += 1
+        elif buy_no_status == "guarded": combo_guarded += 1
+        else: combo_rejected += 1
+        if buy_no_edge is not None and buy_no_edge > combo_best_edge:
+            combo_best_edge = buy_no_edge
+            combo_best_type = "BUY_ALL_NO"
+            combo_best_event = v.event_title
 
         # SELL_ALL_YES
         sell_yes_full = (yes_bid_count == k)
@@ -309,6 +333,14 @@ def run_paper(args: argparse.Namespace) -> int:
             + f"required_legs={k} available_legs={yes_bid_count} "
             f"status={sell_yes_status} reason={sell_yes_reason}"
         )
+        combo_checked += 1
+        if sell_yes_status == "profitable": combo_profitable += 1
+        elif sell_yes_status == "guarded": combo_guarded += 1
+        else: combo_rejected += 1
+        if sell_yes_edge is not None and sell_yes_edge > combo_best_edge:
+            combo_best_edge = sell_yes_edge
+            combo_best_type = "SELL_ALL_YES"
+            combo_best_event = v.event_title
 
         # SELL_ALL_NO
         sell_no_full = (no_bid_count == k)
@@ -328,6 +360,26 @@ def run_paper(args: argparse.Namespace) -> int:
             + (f"gross_edge={sell_no_edge:.4f} " if sell_no_edge is not None else f"gross_edge=na ")
             + f"required_legs={k} available_legs={no_bid_count} "
             f"status={sell_no_status} reason={sell_no_reason}"
+        )
+        combo_checked += 1
+        if sell_no_status == "profitable": combo_profitable += 1
+        elif sell_no_status == "guarded": combo_guarded += 1
+        else: combo_rejected += 1
+        if sell_no_edge is not None and sell_no_edge > combo_best_edge:
+            combo_best_edge = sell_no_edge
+            combo_best_type = "SELL_ALL_NO"
+            combo_best_event = v.event_title
+
+    if combo_checked > 0:
+        print(
+            f"TEMP_COMBO_SUMMARY valid_events={temp_valid} "
+            f"combos_checked={combo_checked} "
+            f"profitable={combo_profitable} "
+            f"guarded={combo_guarded} "
+            f"rejected={combo_rejected} "
+            f"best_type={combo_best_type} "
+            f"best_edge={combo_best_edge:.4f} "
+            f"best_event=\"{combo_best_event}\""
         )
 
     min_edge_by_kind = parse_kind_min_edges(getattr(args, "paper_min_edge_by_kind", ""))
