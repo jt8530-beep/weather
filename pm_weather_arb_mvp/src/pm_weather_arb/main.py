@@ -188,12 +188,11 @@ def run_paper(args: argparse.Namespace) -> int:
         reasons_str = ",".join(f"{k}:{v}" for k, v in sorted(invalid_reasons.items()))
         print(f"temperature_bucket_events_checked={temp_checked} valid={temp_valid} invalid={temp_invalid} invalid_reasons={reasons_str}")
 
-    # V6: diagnostic for valid temperature bucket events → four-way arb evaluation
+    # V6: diagnostic for valid temperature bucket events → four-way combo scoring
     for event_id, v in temp_validations.items():
         if not v.is_valid:
             continue
 
-        # Per-bucket book snapshot + detailed missing counts
         sum_yes_ask = 0.0
         sum_yes_bid = 0.0
         sum_no_ask = 0.0
@@ -241,48 +240,95 @@ def run_paper(args: argparse.Namespace) -> int:
 
         k = v.bucket_count
         print(
-            f"TEMP_BUCKET_COUNTS "
+            f"TEMP_BUCKET_LIQUIDITY "
+            f"event=\"{v.event_title}\" "
+            f"k={k} "
             f"yes_ask={yes_ask_count}/{k} yes_bid={yes_bid_count}/{k} no_ask={no_ask_count}/{k} no_bid={no_bid_count}/{k} "
-            f"miss_ya={missing_yes_ask} miss_yb={missing_yes_bid} miss_na={missing_no_ask} miss_nb={missing_no_bid}"
+            f"missing_yes_ask={missing_yes_ask} missing_yes_bid={missing_yes_bid} "
+            f"missing_no_ask={missing_no_ask} missing_no_bid={missing_no_bid}"
         )
 
-        # BUY_ALL_YES: buy every YES, payout = 1
-        buy_yes_edge = 1.0 - sum_yes_ask - float(args.fee_rate)
+        fee = float(args.fee_rate)
+
+        # BUY_ALL_YES
         buy_yes_full = (yes_ask_count == k)
-        if buy_yes_full and buy_yes_edge > 0:
-            buy_yes_status = f"profitable edge={buy_yes_edge:.4f}"
+        buy_yes_edge = (1.0 - sum_yes_ask - fee) if buy_yes_full else None
+        if buy_yes_full and buy_yes_edge is not None and buy_yes_edge > 0:
+            buy_yes_status = "profitable"
+            buy_yes_reason = "none"
         elif buy_yes_full:
-            buy_yes_status = f"rejected sum_yes_ask={sum_yes_ask:.4f} > 1"
+            buy_yes_status = "rejected"
+            buy_yes_reason = "sum_yes_ask_above_1"
         else:
-            buy_yes_status = f"rejected missing_yes_ask={missing_yes_ask}"
-        print(f"TEMP_BUCKET_ARB direction=BUY_ALL_YES sum_yes_ask={sum_yes_ask:.4f} gross_edge={buy_yes_edge:.4f} full={buy_yes_full} status={buy_yes_status}")
+            buy_yes_status = "rejected"
+            buy_yes_reason = "missing_yes_ask_legs"
+        print(
+            f"TEMP_BUCKET_COMBO type=BUY_ALL_YES "
+            f"sum_cost={sum_yes_ask:.4f} "
+            f"gross_edge={buy_yes_edge:.4f}" if buy_yes_edge is not None else f"gross_edge=na "
+            + f"required_legs={k} available_legs={yes_ask_count} "
+            f"status={buy_yes_status} reason={buy_yes_reason}"
+        )
 
-        # BUY_ALL_NO: buy every NO, payout = k-1 (exactly one YES wins)
-        buy_no_edge = float(k - 1) - sum_no_ask - float(args.fee_rate)
+        # BUY_ALL_NO
         buy_no_full = (no_ask_count == k)
-        if buy_no_full and buy_no_edge > 0:
-            buy_no_status = f"profitable edge={buy_no_edge:.4f}"
+        buy_no_edge = (float(k - 1) - sum_no_ask - fee) if buy_no_full else None
+        if buy_no_full and buy_no_edge is not None and buy_no_edge > 0:
+            buy_no_status = "profitable"
+            buy_no_reason = "none"
         elif buy_no_full:
-            buy_no_status = f"rejected sum_no_ask={sum_no_ask:.4f} > {k-1}"
+            buy_no_status = "rejected"
+            buy_no_reason = "sum_no_ask_above_k_minus_1"
         else:
-            buy_no_status = f"rejected missing_no_ask={missing_no_ask} req={k} avail={no_ask_count}"
-        print(f"TEMP_BUCKET_ARB direction=BUY_ALL_NO sum_no_ask={sum_no_ask:.4f} gross_edge={buy_no_edge:.4f} full={buy_no_full} status={buy_no_status}")
+            buy_no_status = "rejected"
+            buy_no_reason = f"missing_no_ask_legs:{missing_no_ask}"
+        print(
+            f"TEMP_BUCKET_COMBO type=BUY_ALL_NO "
+            f"sum_cost={sum_no_ask:.4f} "
+            f"gross_edge={buy_no_edge:.4f}" if buy_no_edge is not None else f"gross_edge=na "
+            + f"required_legs={k} available_legs={no_ask_count} "
+            f"status={buy_no_status} reason={buy_no_reason}"
+        )
 
-        # SELL_ALL_YES: sell every YES (mint/redeem complete set), gross = sum_yes_bid
-        sell_yes_edge = sum_yes_bid - 1.0 - float(args.fee_rate)
+        # SELL_ALL_YES
         sell_yes_full = (yes_bid_count == k)
-        if sell_yes_full and sell_yes_edge > 0:
-            sell_yes_status = f"theoretical_gross edge={sell_yes_edge:.4f} requires_mint_negrisk_verified"
+        sell_yes_edge = (sum_yes_bid - 1.0 - fee) if sell_yes_full else None
+        if sell_yes_full and sell_yes_edge is not None and sell_yes_edge > 0:
+            sell_yes_status = "guarded"
+            sell_yes_reason = "requires_verified_mint_or_negrisk"
         elif sell_yes_full:
-            sell_yes_status = f"rejected sum_yes_bid={sum_yes_bid:.4f} < 1"
+            sell_yes_status = "rejected"
+            sell_yes_reason = "sum_yes_bid_below_1"
         else:
-            sell_yes_status = f"rejected missing_yes_bid={missing_yes_bid}"
-        print(f"TEMP_BUCKET_ARB direction=SELL_ALL_YES sum_yes_bid={sum_yes_bid:.4f} gross_edge={sell_yes_edge:.4f} full={sell_yes_full} status={sell_yes_status}")
+            sell_yes_status = "rejected"
+            sell_yes_reason = f"missing_yes_bid_legs:{missing_yes_bid}"
+        print(
+            f"TEMP_BUCKET_COMBO type=SELL_ALL_YES "
+            f"sum_bid={sum_yes_bid:.4f} "
+            f"gross_edge={sell_yes_edge:.4f}" if sell_yes_edge is not None else f"gross_edge=na "
+            + f"required_legs={k} available_legs={yes_bid_count} "
+            f"status={sell_yes_status} reason={sell_yes_reason}"
+        )
 
-        # SELL_ALL_NO: sell every NO, theoretical only
+        # SELL_ALL_NO
         sell_no_full = (no_bid_count == k)
-        sell_no_status = f"bid_count={no_bid_count}/{k} theoretical_only" if sell_no_full else f"rejected missing_no_bid={missing_no_bid}"
-        print(f"TEMP_BUCKET_ARB direction=SELL_ALL_NO sum_no_bid={sum_no_bid:.4f} full={sell_no_full} status={sell_no_status}")
+        sell_no_edge = (sum_no_bid - float(k - 1) - fee) if sell_no_full else None
+        if sell_no_full and sell_no_edge is not None and sell_no_edge > 0:
+            sell_no_status = "guarded"
+            sell_no_reason = "requires_verified_mint_or_negrisk"
+        elif sell_no_full:
+            sell_no_status = "rejected"
+            sell_no_reason = "sum_no_bid_below_k_minus_1"
+        else:
+            sell_no_status = "rejected"
+            sell_no_reason = f"missing_no_bid_legs:{missing_no_bid}"
+        print(
+            f"TEMP_BUCKET_COMBO type=SELL_ALL_NO "
+            f"sum_bid={sum_no_bid:.4f} "
+            f"gross_edge={sell_no_edge:.4f}" if sell_no_edge is not None else f"gross_edge=na "
+            + f"required_legs={k} available_legs={no_bid_count} "
+            f"status={sell_no_status} reason={sell_no_reason}"
+        )
 
     min_edge_by_kind = parse_kind_min_edges(getattr(args, "paper_min_edge_by_kind", ""))
     executor = PaperExecutor(
