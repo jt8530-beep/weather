@@ -48,6 +48,17 @@ class PaperAndWsTests(unittest.TestCase):
         self.assertTrue(result.accepted)
         self.assertEqual(result.reason, "paper_fok_all_legs_filled")
 
+    def test_paper_accepts_split_sell_both(self):
+        m = market("e1", "m1", "Will NYC high temp be at least 80F?", "Y1", "N1")
+        books = {"Y1": book("Y1", bids=[("0.53", "50")]), "N1": book("N1", bids=[("0.52", "50")])}
+        opps = scan_all([m], books, Decimal("0"), Decimal("0.005"), Decimal("5"), Decimal("20"))
+        opp = next(o for o in opps if o.kind == "YES_NO_SPLIT_SELL_BOTH")
+        result = PaperExecutor(max_notional_per_trade=Decimal("30"), min_edge=Decimal("0.02")).simulate(
+            opp, books, Decimal("0")
+        )
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.legs[0].reason, "paper_split_collateral")
+
     def test_ws_price_change_updates_book(self):
         cache = MarketBookCache()
         cache.apply_message(
