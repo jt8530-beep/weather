@@ -503,6 +503,69 @@ def run_paper(args: argparse.Namespace) -> int:
     if args.output:
         write_csv(opportunities, args.output)
         print(f"wrote={args.output}")
+    # V6: non-weather summary
+    non_weather_opps = [
+        opp for opp in opportunities
+        if not (opp.kind in ("NEGRISK_BUY_ALL_YES", "NEGRISK_BUY_ALL_NO")
+                and temp_validations.get(opp.event_id)
+                and temp_validations[opp.event_id].is_valid)
+    ]
+    non_weather_results = [
+        r for r in results
+        if not (r.kind in ("NEGRISK_BUY_ALL_YES", "NEGRISK_BUY_ALL_NO")
+                and r.verification_status == "verified")
+    ]
+    nw_accepted = [r for r in non_weather_results if r.accepted]
+    nw_rejected = [r for r in non_weather_results if not r.accepted]
+    nw_guarded = [r for r in nw_rejected if r.reason == "negrisk_disabled_requires_manual_verification"]
+    from collections import Counter
+    kind_counts = Counter(opp.kind for opp in non_weather_opps)
+    yes_no_count = kind_counts.get("YES_NO_BUY_BOTH", 0) + kind_counts.get("YES_NO_SPLIT_SELL_BOTH", 0)
+    negrisk_count = kind_counts.get("NEGRISK_BUY_ALL_YES", 0) + kind_counts.get("NEGRISK_BUY_ALL_NO", 0)
+    threshold_count = kind_counts.get("THRESHOLD_NESTED_BUY_SUPER_YES_SUB_NO", 0)
+    nw_best_edge = float("-inf")
+    nw_best_kind = ""
+    nw_best_event = ""
+    nw_nearmiss_gross = float("-inf")
+    nw_nearmiss_kind = ""
+    nw_nearmiss_event = ""
+    nw_nearmiss_verified = "False"
+    for r in non_weather_results:
+        e = float(r.estimated_edge_per_share) if r.estimated_edge_per_share else 0
+        if e > nw_best_edge:
+            nw_best_edge = e
+            nw_best_kind = r.kind
+            nw_best_event = r.event_title
+        if r.kind.startswith("NEGRISK") and not r.accepted:
+            if e > nw_nearmiss_gross:
+                nw_nearmiss_gross = e
+                nw_nearmiss_kind = r.kind
+                nw_nearmiss_event = r.event_title
+                nw_nearmiss_verified = r.verification_status
+    print(
+        f"NON_WEATHER_SUMMARY "
+        f"events_checked={len(events)} "
+        f"binary_markets={binary_markets} "
+        f"yes_no_complement={yes_no_count} "
+        f"negrisk_groups={negrisk_count} "
+        f"threshold_nested={threshold_count} "
+        f"accepted={len(nw_accepted)} "
+        f"guarded={len(nw_guarded)} "
+        f"rejected={len(nw_rejected)} "
+        f"best_type={nw_best_kind} "
+        f"best_edge={nw_best_edge:.4f} "
+        f"best_event=\"{nw_best_event[:60]}\""
+    )
+    if nw_nearmiss_event and nw_guarded:
+        print(
+            f"NON_WEATHER_NEAR_MISS "
+            f"kind={nw_nearmiss_kind} "
+            f"event=\"{nw_nearmiss_event[:60]}\" "
+            f"gross_edge={nw_nearmiss_gross:.4f} "
+            f"net_edge={nw_best_edge:.4f} "
+            f"verified_negrisk={nw_nearmiss_verified} "
+            f"reason=requires_manual_verification"
+        )
     return 0
 
 
