@@ -542,10 +542,12 @@ def run_paper(args: argparse.Namespace) -> int:
                 nw_nearmiss_kind = r.kind
                 nw_nearmiss_event = r.event_title
                 nw_nearmiss_verified = r.verification_status
+    nw_binary_markets = sum(1 for m in markets if m.yes_token and m.no_token)
+    nw_event_count = len(set(m.event_id for m in markets))
     print(
         f"NON_WEATHER_SUMMARY "
-        f"events_checked={len(events)} "
-        f"binary_markets={binary_markets} "
+        f"events_checked={nw_event_count} "
+        f"binary_markets={nw_binary_markets} "
         f"yes_no_complement={yes_no_count} "
         f"negrisk_groups={negrisk_count} "
         f"threshold_nested={threshold_count} "
