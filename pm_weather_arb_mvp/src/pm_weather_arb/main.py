@@ -196,6 +196,14 @@ def run_paper(args: argparse.Namespace) -> int:
     combo_best_type = ""
     combo_best_edge = float("-inf")
     combo_best_event = ""
+    combo_gross_positive = 0
+    combo_net_positive = 0
+    combo_best_gross_edge = float("-inf")
+    combo_best_net_edge = float("-inf")
+    combo_best_gross_type = ""
+    combo_best_gross_event = ""
+    combo_near_miss_event = ""
+    combo_near_miss_gross = float("-inf")
 
     for event_id, v in temp_validations.items():
         if not v.is_valid:
@@ -285,6 +293,19 @@ def run_paper(args: argparse.Namespace) -> int:
             combo_best_edge = buy_yes_edge
             combo_best_type = "BUY_ALL_YES"
             combo_best_event = v.event_title
+        # gross edge (before safety_buffer)
+        buy_yes_gross = (1.0 - sum_yes_ask) if buy_yes_full else None
+        if buy_yes_gross is not None:
+            if buy_yes_gross > 0: combo_gross_positive += 1
+            if buy_yes_gross > combo_best_gross_edge:
+                combo_best_gross_edge = buy_yes_gross
+                combo_best_gross_type = "BUY_ALL_YES"
+                combo_best_gross_event = v.event_title
+            if buy_yes_edge is not None and buy_yes_edge > 0: combo_net_positive += 1
+            # near-miss: best gross_edge even if net still negative
+            if buy_yes_gross > combo_near_miss_gross:
+                combo_near_miss_gross = buy_yes_gross
+                combo_near_miss_event = v.event_title
 
         # BUY_ALL_NO
         buy_no_full = (no_ask_count == k)
@@ -313,6 +334,17 @@ def run_paper(args: argparse.Namespace) -> int:
             combo_best_edge = buy_no_edge
             combo_best_type = "BUY_ALL_NO"
             combo_best_event = v.event_title
+        buy_no_gross = (float(k - 1) - sum_no_ask) if buy_no_full else None
+        if buy_no_gross is not None:
+            if buy_no_gross > 0: combo_gross_positive += 1
+            if buy_no_gross > combo_best_gross_edge:
+                combo_best_gross_edge = buy_no_gross
+                combo_best_gross_type = "BUY_ALL_NO"
+                combo_best_gross_event = v.event_title
+            if buy_no_edge is not None and buy_no_edge > 0: combo_net_positive += 1
+            if buy_no_gross > combo_near_miss_gross:
+                combo_near_miss_gross = buy_no_gross
+                combo_near_miss_event = v.event_title
 
         # SELL_ALL_YES
         sell_yes_full = (yes_bid_count == k)
@@ -341,6 +373,17 @@ def run_paper(args: argparse.Namespace) -> int:
             combo_best_edge = sell_yes_edge
             combo_best_type = "SELL_ALL_YES"
             combo_best_event = v.event_title
+        sell_yes_gross = (sum_yes_bid - 1.0) if sell_yes_full else None
+        if sell_yes_gross is not None:
+            if sell_yes_gross > 0: combo_gross_positive += 1
+            if sell_yes_gross > combo_best_gross_edge:
+                combo_best_gross_edge = sell_yes_gross
+                combo_best_gross_type = "SELL_ALL_YES"
+                combo_best_gross_event = v.event_title
+            if sell_yes_edge is not None and sell_yes_edge > 0: combo_net_positive += 1
+            if sell_yes_gross > combo_near_miss_gross:
+                combo_near_miss_gross = sell_yes_gross
+                combo_near_miss_event = v.event_title
 
         # SELL_ALL_NO
         sell_no_full = (no_bid_count == k)
@@ -369,18 +412,43 @@ def run_paper(args: argparse.Namespace) -> int:
             combo_best_edge = sell_no_edge
             combo_best_type = "SELL_ALL_NO"
             combo_best_event = v.event_title
+        sell_no_gross = (sum_no_bid - float(k - 1)) if sell_no_full else None
+        if sell_no_gross is not None:
+            if sell_no_gross > 0: combo_gross_positive += 1
+            if sell_no_gross > combo_best_gross_edge:
+                combo_best_gross_edge = sell_no_gross
+                combo_best_gross_type = "SELL_ALL_NO"
+                combo_best_gross_event = v.event_title
+            if sell_no_edge is not None and sell_no_edge > 0: combo_net_positive += 1
+            if sell_no_gross > combo_near_miss_gross:
+                combo_near_miss_gross = sell_no_gross
+                combo_near_miss_event = v.event_title
 
     if combo_checked > 0:
         print(
             f"TEMP_COMBO_SUMMARY valid_events={temp_valid} "
             f"combos_checked={combo_checked} "
-            f"profitable={combo_profitable} "
+            f"accepted={combo_profitable} "
             f"guarded={combo_guarded} "
             f"rejected={combo_rejected} "
-            f"best_type={combo_best_type} "
-            f"best_edge={combo_best_edge:.4f} "
-            f"best_event=\"{combo_best_event}\""
+            f"gross_positive={combo_gross_positive} "
+            f"net_positive={combo_net_positive} "
+            f"best_gross_type={combo_best_gross_type} "
+            f"best_gross_edge={combo_best_gross_edge:.4f} "
+            f"best_net_type={combo_best_type} "
+            f"best_net_edge={combo_best_edge:.4f} "
+            f"best_gross_event=\"{combo_best_gross_event}\""
         )
+        if combo_gross_positive > 0 and combo_net_positive == 0 and combo_near_miss_event:
+            # nearest to profitable but safety_buffer not met
+            print(
+                f"TEMP_COMBO_NEAR_MISS "
+                f"best_gross_type={combo_best_gross_type} "
+                f"best_gross_edge={combo_best_gross_edge:.4f} "
+                f"best_net_edge={combo_best_edge:.4f} "
+                f"event=\"{combo_near_miss_event}\" "
+                f"reason=safety_buffer_not_met"
+            )
 
     min_edge_by_kind = parse_kind_min_edges(getattr(args, "paper_min_edge_by_kind", ""))
     executor = PaperExecutor(
