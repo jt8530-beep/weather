@@ -18,12 +18,9 @@ from __future__ import annotations
 
 import argparse
 import csv
-import math
 from collections import Counter, defaultdict
-from dataclasses import dataclass
-from decimal import Decimal
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, List
 
 
 LIVE_SAFE_HARD_KINDS = {
@@ -35,15 +32,6 @@ PAPER_ONLY_HARD_KINDS = {
     "NEGRISK_BUY_ALL_YES",
     "NEGRISK_BUY_ALL_NO",
 }
-
-
-@dataclass
-class Verdict:
-    status: str
-    reason: str
-    live_ready: int
-    paper_ready: int
-    research_only: int
 
 
 def read_csv(path: Path) -> List[dict]:
@@ -66,33 +54,40 @@ def bval(x) -> bool:
     return str(x).strip().lower() in {"true", "1", "yes", "y"}
 
 
-def classify_hard_arbs(rows: List[dict], min_edge: float, max_notional: float) -> tuple[List[dict], List[dict], List[dict]]:
+def classify_hard_arbs(rows: List[dict], min_edge: float, max_notional: float) -> tuple[List[dict], List[dict], List[dict], Counter]:
     live, paper, research = [], [], []
+    reject_reasons = Counter()
     for r in rows:
         kind = str(r.get("kind") or "")
         edge = fnum(r.get("edge_per_share"))
         cost = fnum(r.get("total_cost"))
         proceeds = fnum(r.get("total_proceeds"))
         notional = max(cost, proceeds)
+        rr = dict(r)
         if edge < min_edge:
+            rr["trade_ready_class"] = "REJECT_EDGE_BELOW_MIN"
+            reject_reasons["hard_edge_below_min"] += 1
+            research.append(rr)
             continue
         if notional <= 0 or notional > max_notional:
+            rr["trade_ready_class"] = "REJECT_NOTIONAL"
+            reject_reasons["hard_notional_out_of_range"] += 1
+            research.append(rr)
             continue
         if kind in LIVE_SAFE_HARD_KINDS:
-            rr = dict(r)
             rr["trade_ready_class"] = "LIVE_READY_HARD_ARB"
             live.append(rr)
         elif kind in PAPER_ONLY_HARD_KINDS:
-            rr = dict(r)
             rr["trade_ready_class"] = "PAPER_ONLY_STRUCTURE_RISK"
             paper.append(rr)
         else:
-            rr = dict(r)
             rr["trade_ready_class"] = "RESEARCH_UNKNOWN_KIND"
+            reject_reasons["hard_unknown_kind"] += 1
             research.append(rr)
     live.sort(key=lambda x: fnum(x.get("edge_per_share")), reverse=True)
     paper.sort(key=lambda x: fnum(x.get("edge_per_share")), reverse=True)
-    return live, paper, research
+    research.sort(key=lambda x: fnum(x.get("edge_per_share")), reverse=True)
+    return live, paper, research, reject_reasons
 
 
 def classify_negrisk_checks(rows: List[dict]) -> tuple[int, Counter]:
@@ -106,13 +101,12 @@ def classify_negrisk_checks(rows: List[dict]) -> tuple[int, Counter]:
     return passed, reasons
 
 
-def classify_maker(rows: List[dict], min_repeats: int, min_edge: float, min_depth_hint: float, max_abs_parity_gap: float) -> tuple[List[dict], List[dict]]:
-    # Group by market_id and require repeated observations. A single wide spread
-    # snapshot is usually just stale/dust/liquidity trap, not a live signal.
+def classify_maker(rows: List[dict], min_repeats: int, min_edge: float, min_depth_hint: float, max_abs_parity_gap: float) -> tuple[List[dict], List[dict], Counter]:
     groups: Dict[str, List[dict]] = defaultdict(list)
     for r in rows:
         groups[str(r.get("market_id") or "")].append(r)
     paper, research = [], []
+    reasons = Counter()
     for market_id, items in groups.items():
         if not market_id:
             continue
@@ -126,23 +120,30 @@ def classify_maker(rows: List[dict], min_repeats: int, min_edge: float, min_dept
         bad_flags = str(best.get("risk_flags") or "")
         rr = dict(best)
         rr["repeat_count"] = str(repeats)
-        if (
-            repeats >= min_repeats
-            and best_edge >= min_edge
-            and depth_hint >= min_depth_hint
-            and 0.10 <= mid <= 0.90
-            and parity_ask <= max_abs_parity_gap
-            and parity_bid <= max_abs_parity_gap
-            and "bad_title" not in bad_flags
-        ):
+        fail = []
+        if repeats < min_repeats:
+            fail.append("maker_min_repeats")
+        if best_edge < min_edge:
+            fail.append("maker_edge_below_min")
+        if depth_hint < min_depth_hint:
+            fail.append("maker_depth_below_min")
+        if not (0.10 <= mid <= 0.90):
+            fail.append("maker_mid_extreme")
+        if parity_ask > max_abs_parity_gap or parity_bid > max_abs_parity_gap:
+            fail.append("maker_parity_gap")
+        if "bad_title" in bad_flags:
+            fail.append("maker_bad_title")
+        if fail:
+            for x in fail:
+                reasons[x] += 1
+            rr["trade_ready_class"] = "RESEARCH_MAKER_" + "+".join(fail)
+            research.append(rr)
+        else:
             rr["trade_ready_class"] = "PAPER_READY_MAKER_REPEAT"
             paper.append(rr)
-        else:
-            rr["trade_ready_class"] = "RESEARCH_MAKER_NOT_REPEAT_OR_PARITY_RISK"
-            research.append(rr)
     paper.sort(key=lambda x: (fnum(x.get("best_maker_edge")), fnum(x.get("max_notional_hint"))), reverse=True)
     research.sort(key=lambda x: fnum(x.get("best_maker_edge")), reverse=True)
-    return paper, research
+    return paper, research, reasons
 
 
 def write_rows(path: Path, rows: List[dict]) -> None:
@@ -174,9 +175,9 @@ def main() -> int:
     maker_rows = read_csv(root / "auto_maker_candidates.csv")
     nr_rows = read_csv(root / "auto_negrisk_checks.csv")
 
-    live_hard, paper_hard, research_hard = classify_hard_arbs(hard_rows, args.min_hard_edge, args.max_hard_notional)
+    live_hard, paper_hard, research_hard, hard_reasons = classify_hard_arbs(hard_rows, args.min_hard_edge, args.max_hard_notional)
     nr_passed, nr_reasons = classify_negrisk_checks(nr_rows)
-    paper_maker, research_maker = classify_maker(
+    paper_maker, research_maker, maker_reasons = classify_maker(
         maker_rows,
         args.maker_min_repeats,
         args.maker_min_edge,
@@ -186,7 +187,9 @@ def main() -> int:
 
     write_rows(root / "trade_ready_live_hard.csv", live_hard)
     write_rows(root / "trade_ready_paper_hard.csv", paper_hard)
+    write_rows(root / "trade_ready_research_hard.csv", research_hard)
     write_rows(root / "trade_ready_paper_maker.csv", paper_maker)
+    write_rows(root / "trade_ready_research_maker.csv", research_maker)
 
     if live_hard:
         status = "LIVE_CANDIDATE"
@@ -212,9 +215,17 @@ def main() -> int:
         f"best_paper_maker_edge={best_paper_maker:.4f}"
     )
     print("NEGRISK_REASONS " + ",".join(f"{k}:{v}" for k, v in nr_reasons.most_common(8)))
+    print("MAKER_REJECTIONS " + ",".join(f"{k}:{v}" for k, v in maker_reasons.most_common(8)))
+    print("HARD_REJECTIONS " + ",".join(f"{k}:{v}" for k, v in hard_reasons.most_common(8)))
     for r in live_hard[: args.top]:
         print(
             f"LIVE_HARD kind={r.get('kind')} edge={r.get('edge_per_share')} "
+            f"notional={max(fnum(r.get('total_cost')), fnum(r.get('total_proceeds'))):.2f} "
+            f"event=\"{str(r.get('event_title') or '')[:90]}\""
+        )
+    for r in paper_hard[: args.top]:
+        print(
+            f"PAPER_HARD kind={r.get('kind')} edge={r.get('edge_per_share')} "
             f"notional={max(fnum(r.get('total_cost')), fnum(r.get('total_proceeds'))):.2f} "
             f"event=\"{str(r.get('event_title') or '')[:90]}\""
         )
