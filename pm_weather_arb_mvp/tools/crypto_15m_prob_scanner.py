@@ -4,15 +4,15 @@
 
 Paper-only. No wallet, no signing, no order submission.
 
-It scans BTC, ETH, and SOL in one strategy/risk pool:
-- discover active Polymarket crypto up/down markets through Gamma
-- pull CLOB YES/NO books
-- pull Binance 1m spot data
-- estimate probability of the current 15m window closing UP vs window open
-- compare model probability with Polymarket ask prices
-- output ranked paper signals across BTC/ETH/SOL
+Important implementation detail:
+Gamma search is unreliable for Polymarket crypto up/down markets. Discovery is
+therefore slug-first. For each 15m UTC window, the market slug is constructed as:
+    {asset}-updown-15m-{unix_window_start_seconds}
+Example:
+    btc-updown-15m-1770000000
 
-This is not arbitrage. It is short-horizon probability trading research.
+The script still uses Gamma's direct slug lookup because that endpoint returns the
+market tokens correctly when the exact slug is known.
 """
 
 from __future__ import annotations
@@ -36,25 +36,12 @@ from pm_weather_arb.clob import ClobPublicClient
 from pm_weather_arb.config import Config
 from pm_weather_arb.gamma import GammaClient, parse_markets_from_events
 from pm_weather_arb.types import Market, OrderBook
-from pm_weather_arb.util import first_present
 
 
 ASSET_SPECS = {
-    "BTC": {
-        "binance": "BTCUSDT",
-        "terms": ["bitcoin", "btc"],
-        "search": ["Bitcoin Up or Down", "BTC Up or Down", "Bitcoin 15 minute", "BTC 15m"],
-    },
-    "ETH": {
-        "binance": "ETHUSDT",
-        "terms": ["ethereum", "ether", "eth"],
-        "search": ["Ethereum Up or Down", "ETH Up or Down", "Ethereum 15 minute", "ETH 15m"],
-    },
-    "SOL": {
-        "binance": "SOLUSDT",
-        "terms": ["solana", "sol"],
-        "search": ["Solana Up or Down", "SOL Up or Down", "Solana 15 minute", "SOL 15m"],
-    },
+    "BTC": {"binance": "BTCUSDT", "terms": ["bitcoin", "btc"], "slug_prefix": "btc"},
+    "ETH": {"binance": "ETHUSDT", "terms": ["ethereum", "ether", "eth"], "slug_prefix": "eth"},
+    "SOL": {"binance": "SOLUSDT", "terms": ["solana", "sol"], "slug_prefix": "sol"},
 }
 
 
@@ -65,6 +52,7 @@ class AssetState:
     now_ms: int
     interval_start_ms: int
     interval_end_ms: int
+    window_ts: int
     elapsed_sec: int
     remaining_sec: int
     start_price: float
@@ -83,6 +71,7 @@ class CryptoSignal:
     ts_ms: int
     asset: str
     symbol: str
+    slug: str
     event_id: str
     event_title: str
     market_id: str
@@ -165,10 +154,7 @@ def find_start_price(klines: List[dict], start_ms: int) -> Optional[float]:
 
 
 def one_min_returns(klines: List[dict]) -> List[float]:
-    out = []
-    for i in range(1, len(klines)):
-        out.append(log_return(float(klines[i - 1]["close"]), float(klines[i]["close"])))
-    return out
+    return [log_return(float(klines[i - 1]["close"]), float(klines[i]["close"])) for i in range(1, len(klines))]
 
 
 def empirical_prob_up(klines: List[dict], elapsed_min: int, r_now: float, sigma_min: float) -> Tuple[float, int]:
@@ -240,6 +226,7 @@ def estimate_asset_state(asset: str, symbol: str, kline_limit: int, min_remainin
         now_ms=now,
         interval_start_ms=start_ms,
         interval_end_ms=end_ms,
+        window_ts=int(start_ms // 1000),
         elapsed_sec=elapsed_sec,
         remaining_sec=remaining_sec,
         start_price=start_price,
@@ -254,28 +241,9 @@ def estimate_asset_state(asset: str, symbol: str, kline_limit: int, min_remainin
     )
 
 
-def raw_gamma_events(config: Config, terms: Iterable[str], limit: int) -> List[dict]:
-    gamma = GammaClient(config)
-    seen = set()
-    out: List[dict] = []
-    for term in terms:
-        for key in ("search", "q", "query"):
-            try:
-                batch = gamma.list_events_raw({
-                    "active": "true",
-                    "closed": "false",
-                    key: term,
-                    "limit": limit,
-                })
-            except Exception:
-                continue
-            for e in batch:
-                eid = str(first_present(e, "id", "eventId", default=""))
-                if not eid or eid in seen:
-                    continue
-                seen.add(eid)
-                out.append(e)
-    return out
+def slug_for(asset: str, window_ts: int) -> str:
+    prefix = ASSET_SPECS[asset]["slug_prefix"]
+    return f"{prefix}-updown-15m-{window_ts}"
 
 
 def infer_asset(market: Market) -> Optional[str]:
@@ -283,35 +251,30 @@ def infer_asset(market: Market) -> Optional[str]:
     for asset, spec in ASSET_SPECS.items():
         if any(t in text for t in spec["terms"]):
             return asset
+    # Slug fallback is the most reliable for updown markets.
+    for asset, spec in ASSET_SPECS.items():
+        if market.event_slug.startswith(spec["slug_prefix"] + "-updown-15m"):
+            return asset
     return None
 
 
-def looks_like_updown_15m(market: Market) -> bool:
-    text = " ".join([market.event_title, market.question, market.event_slug, market.market_slug]).lower()
-    if not any(x in text for x in ["up or down", "higher", "above", "below", "increase", "decrease", "up/down"]):
-        return False
-    bad = ["2027", "2028", "annual", "election", "winner", "etf", "reserve", "market cap"]
-    if any(x in text for x in bad):
-        return False
-    return any(x in text for x in ["15", "15m", "15-minute", "15 minute", "up or down"])
-
-
-def discover_crypto_markets(config: Config, assets: set[str], search_limit: int) -> List[Market]:
-    terms: List[str] = []
-    for asset in assets:
-        if asset in ASSET_SPECS:
-            terms.extend(ASSET_SPECS[asset]["search"])
-    events = raw_gamma_events(config, terms, limit=search_limit)
+def discover_crypto_markets(config: Config, states: Dict[str, AssetState], slug_lag_windows: int) -> List[Market]:
+    gamma = GammaClient(config)
+    slugs: List[str] = []
+    for asset, st in states.items():
+        for i in range(0, max(0, slug_lag_windows) + 1):
+            slugs.append(slug_for(asset, st.window_ts - i * 900))
+            slugs.append(slug_for(asset, st.window_ts + i * 900))
+    slugs = sorted(set(slugs))
+    events = gamma.list_events_by_slugs(slugs)
     markets = parse_markets_from_events(events, only_weatherish=False)
-    out = []
+    out: List[Market] = []
     seen = set()
     for m in markets:
         if not m.yes_token or not m.no_token:
             continue
         asset = infer_asset(m)
-        if not asset or asset not in assets:
-            continue
-        if not looks_like_updown_15m(m):
+        if not asset or asset not in states:
             continue
         key = f"{m.event_id}:{m.market_id}"
         if key in seen:
@@ -368,7 +331,7 @@ def scan(args: argparse.Namespace) -> int:
         if st:
             states[asset] = st
             print(
-                f"CRYPTO15_MODEL asset={asset} symbol={st.symbol} "
+                f"CRYPTO15_MODEL asset={asset} slug={slug_for(asset, st.window_ts)} symbol={st.symbol} "
                 f"window={iso_ms(st.interval_start_ms)}->{iso_ms(st.interval_end_ms)} "
                 f"elapsed={st.elapsed_sec}s remaining={st.remaining_sec}s "
                 f"start={st.start_price:.4f} last={st.last_price:.4f} "
@@ -383,10 +346,10 @@ def scan(args: argparse.Namespace) -> int:
         print("CRYPTO15_SUMMARY markets=0 books=0 signals=0 reason=no_asset_state")
         return 0
 
-    markets = discover_crypto_markets(config, args.assets, search_limit=args.search_limit)
+    markets = discover_crypto_markets(config, states, slug_lag_windows=args.slug_lag_windows)
     if args.debug:
         for m in markets[: args.top]:
-            print(f"CRYPTO15_MARKET asset={infer_asset(m)} event=\"{m.event_title}\" q=\"{m.question}\" slug={m.market_slug}")
+            print(f"CRYPTO15_MARKET asset={infer_asset(m)} event=\"{m.event_title}\" q=\"{m.question}\" slug={m.event_slug}")
 
     token_ids = []
     for m in markets:
@@ -436,6 +399,7 @@ def scan(args: argparse.Namespace) -> int:
                 ts_ms=now,
                 asset=asset,
                 symbol=st.symbol,
+                slug=slug_for(asset, st.window_ts),
                 event_id=m.event_id,
                 event_title=m.event_title,
                 market_id=m.market_id,
@@ -478,7 +442,8 @@ def scan(args: argparse.Namespace) -> int:
         print(
             f"CRYPTO15_SIGNAL asset={s.asset} action={s.action} edge={s.edge:.4f} "
             f"prob={s.model_prob:.4f} ask={s.ask:.4f} bid={s.bid:.4f} spread={s.spread:.4f} "
-            f"depth={s.ask_size:.2f} remaining={s.remaining_sec}s event=\"{s.event_title[:80]}\" q=\"{s.question[:80]}\""
+            f"depth={s.ask_size:.2f} remaining={s.remaining_sec}s slug={s.slug} "
+            f"event=\"{s.event_title[:80]}\" q=\"{s.question[:80]}\""
         )
     return 0
 
@@ -486,7 +451,6 @@ def scan(args: argparse.Namespace) -> int:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--assets", default="BTC,ETH,SOL", help="comma list: BTC,ETH,SOL")
-    p.add_argument("--search-limit", type=int, default=100)
     p.add_argument("--book-batch-size", type=int, default=250)
     p.add_argument("--kline-limit", type=int, default=1000)
     p.add_argument("--fee-rate", default="0.01")
@@ -497,6 +461,7 @@ def main() -> int:
     p.add_argument("--max-shares", default="20")
     p.add_argument("--min-remaining-sec", type=int, default=180)
     p.add_argument("--max-elapsed-sec", type=int, default=720)
+    p.add_argument("--slug-lag-windows", type=int, default=1, help="also try +/- N adjacent 15m slugs")
     p.add_argument("--top", type=int, default=10)
     p.add_argument("--output", default="paper_logs/crypto_15m_signals.csv")
     p.add_argument("--debug", action="store_true")
