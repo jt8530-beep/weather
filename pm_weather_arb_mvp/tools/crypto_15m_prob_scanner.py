@@ -4,15 +4,14 @@
 
 Paper-only. No wallet, no signing, no order submission.
 
-Important implementation detail:
-Gamma search is unreliable for Polymarket crypto up/down markets. Discovery is
-therefore slug-first. For each 15m UTC window, the market slug is constructed as:
+Discovery is slug-first because Gamma search is unreliable for crypto up/down
+markets. For each 15m UTC window, the current market slug is constructed as:
     {asset}-updown-15m-{unix_window_start_seconds}
-Example:
-    btc-updown-15m-1770000000
 
-The script still uses Gamma's direct slug lookup because that endpoint returns the
-market tokens correctly when the exact slug is known.
+Important risk controls:
+- default signals are allowed ONLY on the current 15m window slug
+- adjacent slugs are fetched only for diagnostics unless --allow-adjacent-windows is set
+- default min elapsed is 60 seconds, avoiding the first-candle noise trap
 """
 
 from __future__ import annotations
@@ -21,13 +20,14 @@ import argparse
 import csv
 import json
 import math
+import re
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from statistics import mean, pstdev
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 from dotenv import load_dotenv
@@ -53,6 +53,7 @@ class AssetState:
     interval_start_ms: int
     interval_end_ms: int
     window_ts: int
+    current_slug: str
     elapsed_sec: int
     remaining_sec: int
     start_price: float
@@ -71,7 +72,9 @@ class CryptoSignal:
     ts_ms: int
     asset: str
     symbol: str
-    slug: str
+    current_slug: str
+    market_slug: str
+    market_window_ts: int
     event_id: str
     event_title: str
     market_id: str
@@ -115,6 +118,18 @@ def log_return(a: float, b: float) -> float:
     if a <= 0 or b <= 0:
         return 0.0
     return math.log(b / a)
+
+
+def slug_for(asset: str, window_ts: int) -> str:
+    prefix = ASSET_SPECS[asset]["slug_prefix"]
+    return f"{prefix}-updown-15m-{window_ts}"
+
+
+def slug_window_ts(slug: str) -> Optional[int]:
+    m = re.search(r"-(\d{9,11})$", str(slug or ""))
+    if not m:
+        return None
+    return int(m.group(1))
 
 
 def binance_klines(symbol: str, limit: int = 1000, timeout: float = 10.0) -> List[dict]:
@@ -191,7 +206,14 @@ def empirical_prob_up(klines: List[dict], elapsed_min: int, r_now: float, sigma_
     return clamp(float(p), 0.02, 0.98), len(vals)
 
 
-def estimate_asset_state(asset: str, symbol: str, kline_limit: int, min_remaining_sec: int, max_elapsed_sec: int) -> Optional[AssetState]:
+def estimate_asset_state(
+    asset: str,
+    symbol: str,
+    kline_limit: int,
+    min_elapsed_sec: int,
+    min_remaining_sec: int,
+    max_elapsed_sec: int,
+) -> Optional[AssetState]:
     klines = binance_klines(symbol, limit=kline_limit)
     if len(klines) < 120:
         return None
@@ -199,6 +221,8 @@ def estimate_asset_state(asset: str, symbol: str, kline_limit: int, min_remainin
     start_ms, end_ms = current_15m_window(now)
     elapsed_sec = int((now - start_ms) / 1000)
     remaining_sec = int((end_ms - now) / 1000)
+    if elapsed_sec < min_elapsed_sec:
+        return None
     if remaining_sec < min_remaining_sec:
         return None
     if elapsed_sec > max_elapsed_sec:
@@ -220,13 +244,15 @@ def estimate_asset_state(asset: str, symbol: str, kline_limit: int, min_remainin
     p_norm = clamp(normal_cdf(z), 0.02, 0.98)
     p_emp, samples = empirical_prob_up(klines, max(1, elapsed_sec // 60), r_now, sigma_min)
     p_up = clamp(0.65 * p_norm + 0.35 * p_emp, 0.02, 0.98)
+    window_ts = int(start_ms // 1000)
     return AssetState(
         asset=asset,
         symbol=symbol,
         now_ms=now,
         interval_start_ms=start_ms,
         interval_end_ms=end_ms,
-        window_ts=int(start_ms // 1000),
+        window_ts=window_ts,
+        current_slug=slug_for(asset, window_ts),
         elapsed_sec=elapsed_sec,
         remaining_sec=remaining_sec,
         start_price=start_price,
@@ -241,19 +267,12 @@ def estimate_asset_state(asset: str, symbol: str, kline_limit: int, min_remainin
     )
 
 
-def slug_for(asset: str, window_ts: int) -> str:
-    prefix = ASSET_SPECS[asset]["slug_prefix"]
-    return f"{prefix}-updown-15m-{window_ts}"
-
-
 def infer_asset(market: Market) -> Optional[str]:
     text = " ".join([market.event_title, market.question, market.event_slug, market.market_slug]).lower()
     for asset, spec in ASSET_SPECS.items():
-        if any(t in text for t in spec["terms"]):
-            return asset
-    # Slug fallback is the most reliable for updown markets.
-    for asset, spec in ASSET_SPECS.items():
         if market.event_slug.startswith(spec["slug_prefix"] + "-updown-15m"):
+            return asset
+        if any(t in text for t in spec["terms"]):
             return asset
     return None
 
@@ -325,13 +344,14 @@ def scan(args: argparse.Namespace) -> int:
             asset=asset,
             symbol=ASSET_SPECS[asset]["binance"],
             kline_limit=args.kline_limit,
+            min_elapsed_sec=args.min_elapsed_sec,
             min_remaining_sec=args.min_remaining_sec,
             max_elapsed_sec=args.max_elapsed_sec,
         )
         if st:
             states[asset] = st
             print(
-                f"CRYPTO15_MODEL asset={asset} slug={slug_for(asset, st.window_ts)} symbol={st.symbol} "
+                f"CRYPTO15_MODEL asset={asset} slug={st.current_slug} symbol={st.symbol} "
                 f"window={iso_ms(st.interval_start_ms)}->{iso_ms(st.interval_end_ms)} "
                 f"elapsed={st.elapsed_sec}s remaining={st.remaining_sec}s "
                 f"start={st.start_price:.4f} last={st.last_price:.4f} "
@@ -349,7 +369,8 @@ def scan(args: argparse.Namespace) -> int:
     markets = discover_crypto_markets(config, states, slug_lag_windows=args.slug_lag_windows)
     if args.debug:
         for m in markets[: args.top]:
-            print(f"CRYPTO15_MARKET asset={infer_asset(m)} event=\"{m.event_title}\" q=\"{m.question}\" slug={m.event_slug}")
+            mw = slug_window_ts(m.event_slug)
+            print(f"CRYPTO15_MARKET asset={infer_asset(m)} market_window_ts={mw} event=\"{m.event_title}\" q=\"{m.question}\" slug={m.event_slug}")
 
     token_ids = []
     for m in markets:
@@ -362,13 +383,17 @@ def scan(args: argparse.Namespace) -> int:
 
     now = utc_ms()
     signals: List[CryptoSignal] = []
-    rejects = {"asset_missing": 0, "no_book": 0, "wide_spread": 0, "low_depth": 0, "edge_below_min": 0}
+    rejects = {"asset_missing": 0, "adjacent_window": 0, "no_book": 0, "wide_spread": 0, "low_depth": 0, "edge_below_min": 0}
     for m in markets:
         asset = infer_asset(m)
         if not asset or asset not in states:
             rejects["asset_missing"] += 1
             continue
         st = states[asset]
+        market_window_ts = slug_window_ts(m.event_slug)
+        if not args.allow_adjacent_windows and market_window_ts != st.window_ts:
+            rejects["adjacent_window"] += 1
+            continue
         yb = books.get(m.yes_token.token_id if m.yes_token else "")
         nb = books.get(m.no_token.token_id if m.no_token else "")
         yes_bid, yes_ask, yes_bid_sz, yes_ask_sz = best_bid_ask(yb)
@@ -399,7 +424,9 @@ def scan(args: argparse.Namespace) -> int:
                 ts_ms=now,
                 asset=asset,
                 symbol=st.symbol,
-                slug=slug_for(asset, st.window_ts),
+                current_slug=st.current_slug,
+                market_slug=m.event_slug,
+                market_window_ts=int(market_window_ts or 0),
                 event_id=m.event_id,
                 event_title=m.event_title,
                 market_id=m.market_id,
@@ -420,7 +447,7 @@ def scan(args: argparse.Namespace) -> int:
                 remaining_sec=st.remaining_sec,
                 p_up=st.p_up,
                 p_down=1.0 - st.p_up,
-                reason="model_prob_minus_ask",
+                reason="model_prob_minus_ask_current_window",
             ))
 
     signals.sort(key=lambda x: (x.edge, x.ask_size), reverse=True)
@@ -442,8 +469,8 @@ def scan(args: argparse.Namespace) -> int:
         print(
             f"CRYPTO15_SIGNAL asset={s.asset} action={s.action} edge={s.edge:.4f} "
             f"prob={s.model_prob:.4f} ask={s.ask:.4f} bid={s.bid:.4f} spread={s.spread:.4f} "
-            f"depth={s.ask_size:.2f} remaining={s.remaining_sec}s slug={s.slug} "
-            f"event=\"{s.event_title[:80]}\" q=\"{s.question[:80]}\""
+            f"depth={s.ask_size:.2f} elapsed={s.elapsed_sec}s remaining={s.remaining_sec}s "
+            f"slug={s.market_slug} event=\"{s.event_title[:80]}\" q=\"{s.question[:80]}\""
         )
     return 0
 
@@ -459,9 +486,11 @@ def main() -> int:
     p.add_argument("--min-depth-shares", type=float, default=20.0)
     p.add_argument("--min-shares", default="5")
     p.add_argument("--max-shares", default="20")
+    p.add_argument("--min-elapsed-sec", type=int, default=60)
     p.add_argument("--min-remaining-sec", type=int, default=180)
     p.add_argument("--max-elapsed-sec", type=int, default=720)
-    p.add_argument("--slug-lag-windows", type=int, default=1, help="also try +/- N adjacent 15m slugs")
+    p.add_argument("--slug-lag-windows", type=int, default=1, help="fetch +/- N adjacent 15m slugs for diagnostics")
+    p.add_argument("--allow-adjacent-windows", action="store_true", help="research only; allow non-current window signals")
     p.add_argument("--top", type=int, default=10)
     p.add_argument("--output", default="paper_logs/crypto_15m_signals.csv")
     p.add_argument("--debug", action="store_true")
