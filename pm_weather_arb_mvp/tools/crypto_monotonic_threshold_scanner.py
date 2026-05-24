@@ -42,23 +42,32 @@ from pm_weather_arb.types import OrderBook
 from pm_weather_arb.util import first_present
 
 
+SCANNER_VERSION = "mono_threshold_v3_spot_usd_only_20260524"
+
 ASSET_TERMS = {
     "BTC": ["bitcoin", "btc"],
     "ETH": ["ethereum", "ether", "eth"],
     "SOL": ["solana", "sol"],
 }
 
-# Must be about the coin's own USD price, not NFT floor denominated in ETH/SOL.
+# Hard sanity ranges for coin USD spot thresholds. These prevent NFT-floor and
+# unit-denominated false positives such as CryptoPunks 20 ETH or Pudgy 2 ETH.
+PRICE_RANGES = {
+    "BTC": (1000.0, 1_000_000.0),
+    "ETH": (100.0, 100_000.0),
+    "SOL": (1.0, 10_000.0),
+}
+
 SPOT_PRICE_TERMS = ["price", "$", "usd", "usdc", "dollar", "dollars"]
 PATH_TERMS = ["hit", "reach", "touch", "trade above", "trade below", "go above", "go below", "break above", "break below", "dip", "drop"]
-NFT_FLOOR_TERMS = ["cryptopunk", "cryptopunks", "pudgy", "penguin", "penguins", "azuki", "bayc", "mayc", "floor", "nft", "milady"]
+NFT_FLOOR_TERMS = ["cryptopunk", "cryptopunks", "pudgy", "penguin", "penguins", "azuki", "bayc", "mayc", "floor", "floor price", "nft", "milady"]
 BAD_TERMS = ["market cap", "etf", "election", "reserve", "company", "ipo", "stock", "mstr", "microstrategy"]
 
 
 @dataclass
 class ParsedThreshold:
     asset: str
-    direction: str  # above / below
+    direction: str
     threshold: float
     expiry_ts: int
     event_id: str
@@ -75,6 +84,7 @@ class ParsedThreshold:
 @dataclass
 class MonoCandidate:
     ts_ms: int
+    scanner_version: str
     kind: str
     asset: str
     direction: str
@@ -132,6 +142,11 @@ def infer_asset(text: str) -> Optional[str]:
     return None
 
 
+def threshold_in_asset_range(asset: str, threshold: float) -> bool:
+    lo, hi = PRICE_RANGES.get(asset, (0.0, float("inf")))
+    return lo <= threshold <= hi
+
+
 def has_usd_price_context(text: str) -> bool:
     t = norm(text)
     if any(x in t for x in NFT_FLOOR_TERMS):
@@ -141,42 +156,38 @@ def has_usd_price_context(text: str) -> bool:
     if not any(x in t for x in SPOT_PRICE_TERMS):
         return False
     # Reject plain "20 ETH" / "10 ETH" denominated thresholds unless there is a
-    # clear USD dollar threshold too.
-    if re.search(r"\b\d+(?:\.\d+)?\s*(eth|sol|btc)\b", t) and "$" not in t and "usd" not in t:
+    # clear USD/dollar threshold too.
+    if re.search(r"\b\d+(?:\.\d+)?\s*(eth|sol|btc)\b", t) and "$" not in t and "usd" not in t and "dollar" not in t:
         return False
     return True
 
 
 def parse_threshold(text: str) -> Optional[float]:
     t = str(text).replace(",", "")
-    # Prefer dollar-marked numbers. This avoids NFT floor false positives.
     dollar_vals = []
     for m in re.finditer(r"\$\s*(\d+(?:\.\d+)?)\s*k\b", t, flags=re.I):
         dollar_vals.append(float(m.group(1)) * 1000.0)
-    for m in re.finditer(r"\$\s*(\d{2,7}(?:\.\d+)?)", t):
+    for m in re.finditer(r"\$\s*(\d{1,7}(?:\.\d+)?)", t):
         dollar_vals.append(float(m.group(1)))
     if dollar_vals:
-        vals = [v for v in dollar_vals if v not in range(2020, 2035)]
+        vals = [v for v in dollar_vals if int(v) not in range(2020, 2035)]
         return max(vals) if vals else None
-    # Fallback for explicit USD wording.
     if "usd" in t.lower() or "dollar" in t.lower():
         m = re.search(r"(\d+(?:\.\d+)?)\s*k\b", t, flags=re.I)
         if m:
             return float(m.group(1)) * 1000.0
-        vals = [float(m.group(1)) for m in re.finditer(r"\b(\d{2,7}(?:\.\d+)?)\b", t)]
-        vals = [v for v in vals if v not in range(2020, 2035)]
+        vals = [float(m.group(1)) for m in re.finditer(r"\b(\d{1,7}(?:\.\d+)?)\b", t)]
+        vals = [v for v in vals if int(v) not in range(2020, 2035)]
         return max(vals) if vals else None
     return None
 
 
 def parse_direction(text: str) -> Optional[str]:
     t = norm(text)
-    if any(x in t for x in ["above", "over", "higher than", "greater than", "reach", "hit", "touch", "break above"]):
-        # hit/reach without below usually means upside target.
-        if "below" not in t and "under" not in t and "dip" not in t and "drop" not in t:
-            return "above"
     if any(x in t for x in ["below", "under", "lower than", "less than", "dip", "drop", "break below"]):
         return "below"
+    if any(x in t for x in ["above", "over", "higher than", "greater than", "reach", "hit", "touch", "break above"]):
+        return "above"
     return None
 
 
@@ -188,7 +199,6 @@ def is_strict_path_dependent(text: str) -> bool:
         return False
     if not any(x in t for x in [" by ", "before", "during", "in 202", "this year", "next year"]):
         return False
-    # Reject simple closing/on-date markets. They are not monotonic through time.
     if any(x in t for x in ["close above", "close below", "closing price", "at end", "end of"]):
         return False
     return True
@@ -229,7 +239,9 @@ def parse_events(config: Config, pages: int, limit: int, order: str, max_days: f
             direction = parse_direction(text)
             threshold = parse_threshold(text)
             expiry = event_expiry_ts(e, raw_m)
-            if not asset or not direction or not threshold or not expiry:
+            if not asset or not direction or threshold is None or not expiry:
+                continue
+            if not threshold_in_asset_range(asset, threshold):
                 continue
             days = (expiry - now) / 86400.0
             if days <= 0 or days > max_days:
@@ -287,6 +299,7 @@ def add_candidate(
         return
     out.append(MonoCandidate(
         ts_ms=int(time.time() * 1000),
+        scanner_version=SCANNER_VERSION,
         kind=kind,
         asset=superset.asset,
         direction=superset.direction,
@@ -337,6 +350,7 @@ def main() -> int:
     args = p.parse_args()
 
     load_dotenv()
+    print(f"MONO_THRESHOLD_VERSION {SCANNER_VERSION}")
     config = Config()
     parsed = parse_events(config, args.pages, args.limit, args.order, args.max_days)
     clob = ClobPublicClient(config)
@@ -345,7 +359,6 @@ def main() -> int:
 
     out: List[MonoCandidate] = []
 
-    # 1) Same threshold, different deadline: earlier event subset of later event.
     by_same_threshold: Dict[Tuple[str, str, float], List[ParsedThreshold]] = {}
     for x in parsed:
         by_same_threshold.setdefault((x.asset, x.direction, x.threshold), []).append(x)
@@ -353,36 +366,29 @@ def main() -> int:
         items = sorted(items, key=lambda x: x.expiry_ts)
         for i in range(len(items)):
             for j in range(i + 1, len(items)):
-                earlier = items[i]
-                later = items[j]
                 add_candidate(
                     out,
                     "MONO_SAME_THRESHOLD_BUY_LATER_YES_BUY_EARLIER_NO",
-                    superset=later,
-                    subset=earlier,
+                    superset=items[j],
+                    subset=items[i],
                     books=books,
                     min_depth=args.min_depth_shares,
                     min_edge=args.min_edge,
                     reason="same_threshold_later_deadline_superset",
                 )
 
-    # 2) Same deadline, nested threshold.
     by_same_expiry: Dict[Tuple[str, str, int], List[ParsedThreshold]] = {}
     for x in parsed:
         by_same_expiry.setdefault((x.asset, x.direction, x.expiry_ts), []).append(x)
     for (_, direction, _), items in by_same_expiry.items():
         items = sorted(items, key=lambda x: x.threshold)
-        if len(items) < 2:
-            continue
         for i in range(len(items)):
             for j in range(i + 1, len(items)):
                 low = items[i]
                 high = items[j]
                 if direction == "below":
-                    # hit below low => hit below high, so high-threshold event is superset.
                     superset, subset = high, low
                 else:
-                    # hit above high => hit above low, so low-threshold event is superset.
                     superset, subset = low, high
                 add_candidate(
                     out,
@@ -401,13 +407,13 @@ def main() -> int:
     best = out[0] if out else None
     groups = len(by_same_threshold) + len(by_same_expiry)
     print(
-        f"MONO_THRESHOLD_SUMMARY parsed={len(parsed)} groups={groups} candidates={len(out)} "
+        f"MONO_THRESHOLD_SUMMARY version={SCANNER_VERSION} parsed={len(parsed)} groups={groups} candidates={len(out)} "
         f"best_edge={(best.gross_edge if best else float('-inf')):.4f} best_asset={(best.asset if best else '')} "
         f"best_threshold={(best.threshold if best else '')}"
     )
     for c in out[: args.top]:
         print(
-            f"MONO_THRESHOLD_CANDIDATE kind={c.kind} asset={c.asset} dir={c.direction} "
+            f"MONO_THRESHOLD_CANDIDATE version={SCANNER_VERSION} kind={c.kind} asset={c.asset} dir={c.direction} "
             f"super={c.superset_threshold} sub={c.subset_threshold} edge={c.gross_edge:.4f} "
             f"cost={c.cost:.4f} max_size={c.max_size:.2f} "
             f"superset=\"{c.superset_event[:65]}\" subset=\"{c.subset_event[:65]}\""
