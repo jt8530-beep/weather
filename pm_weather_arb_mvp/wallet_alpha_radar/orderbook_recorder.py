@@ -7,6 +7,10 @@ Phase 1 data recorder. No wallet, no signing, no orders.
 The purpose is to build our own historical order book snapshots for future
 T+60s/T+300s delayed follow backtesting. Without this database, copy-trading
 backtests are mostly fantasy.
+
+If a market watchlist is provided, the recorder prioritizes active markets that
+match the watchlist by market_id / condition_id / market_slug. It then fills the
+remaining slots with high-volume active markets.
 """
 
 from __future__ import annotations
@@ -26,23 +30,21 @@ from pm_weather_arb.gamma import GammaClient, parse_markets_from_events
 from pm_weather_arb.types import OrderBook
 
 
-def read_candidate_markets(path: Path, top_markets: int) -> List[str]:
+def read_candidate_markets(path: Path, top_markets: int) -> Set[str]:
     if not path.exists():
-        return []
+        return set()
     markets: List[str] = []
     with path.open(newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
-    # candidate_wallets.csv only has market_count_hint, not specific market ids.
-    # If a richer file is passed, support market_id/condition_id columns.
     for r in rows:
-        for key in ["market_id", "condition_id", "conditionId", "market", "slug"]:
-            val = str(r.get(key) or "").strip()
+        for key in ["market_id", "condition_id", "conditionId", "market", "slug", "market_slug"]:
+            val = str(r.get(key) or "").strip().lower()
             if val:
                 markets.append(val)
                 break
         if len(markets) >= top_markets:
             break
-    return markets
+    return set(markets)
 
 
 def discover_active_markets(limit: int, pages: int, order: str) -> list:
@@ -63,6 +65,25 @@ def discover_active_markets(limit: int, pages: int, order: str) -> list:
         if len(batch) < limit:
             break
     return parse_markets_from_events(events, only_weatherish=False)
+
+
+def market_keys(m) -> Set[str]:
+    vals = [m.market_id, m.condition_id, m.market_slug, m.event_slug]
+    return {str(x).strip().lower() for x in vals if x}
+
+
+def prioritize_markets(markets: list, watch_ids: Set[str], top_markets: int) -> tuple[list, int]:
+    if not watch_ids:
+        return markets[:top_markets], 0
+    watched = []
+    other = []
+    for m in markets:
+        if market_keys(m) & watch_ids:
+            watched.append(m)
+        else:
+            other.append(m)
+    selected = (watched + other)[:top_markets]
+    return selected, len(watched)
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -103,10 +124,12 @@ def best_values(book: Optional[OrderBook]) -> tuple[Optional[float], Optional[fl
     return bid_f, ask_f, bid_size, ask_size, spread
 
 
-def record_once(db_path: Path, top_markets: int, pages: int, limit: int, order: str) -> int:
+def record_once(db_path: Path, top_markets: int, pages: int, limit: int, order: str, market_watchlist: Optional[Path] = None) -> int:
     load_dotenv()
-    markets = discover_active_markets(limit=limit, pages=pages, order=order)
-    markets = [m for m in markets if m.yes_token and m.no_token][:top_markets]
+    watch_ids = read_candidate_markets(market_watchlist, top_markets * 5) if market_watchlist else set()
+    markets_all = discover_active_markets(limit=limit, pages=pages, order=order)
+    markets_all = [m for m in markets_all if m.yes_token and m.no_token]
+    markets, watched_available = prioritize_markets(markets_all, watch_ids, top_markets)
     token_ids = []
     for m in markets:
         token_ids.append(m.yes_token.token_id)
@@ -150,14 +173,15 @@ def record_once(db_path: Path, top_markets: int, pages: int, limit: int, order: 
         conn.close()
     print(
         f"ORDERBOOK_RECORDER_SUMMARY ts_ms={ts_ms} markets={len(markets)} tokens={len(token_ids)} "
-        f"books={len(books)} rows={len(rows)} db={db_path}"
+        f"books={len(books)} rows={len(rows)} watched_ids={len(watch_ids)} watched_available={watched_available} db={db_path}"
     )
     return len(rows)
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--candidates", default="paper_logs/wallet_alpha/candidate_wallets.csv", help="reserved for future market-target mode")
+    p.add_argument("--candidates", default="paper_logs/wallet_alpha/candidate_wallets.csv", help="reserved legacy alias")
+    p.add_argument("--market-watchlist", default="", help="CSV with market_id / condition_id / market_slug columns")
     p.add_argument("--db", default="paper_logs/wallet_alpha/orderbook_snapshots.sqlite")
     p.add_argument("--top-markets", type=int, default=200)
     p.add_argument("--pages", type=int, default=5)
@@ -167,13 +191,15 @@ def main() -> int:
     p.add_argument("--sleep", type=int, default=30)
     args = p.parse_args()
 
+    watch_path = Path(args.market_watchlist) if args.market_watchlist else None
+
     if args.once:
-        record_once(Path(args.db), args.top_markets, args.pages, args.limit, args.order)
+        record_once(Path(args.db), args.top_markets, args.pages, args.limit, args.order, watch_path)
         return 0
 
     while True:
         try:
-            record_once(Path(args.db), args.top_markets, args.pages, args.limit, args.order)
+            record_once(Path(args.db), args.top_markets, args.pages, args.limit, args.order, watch_path)
         except Exception as e:
             print(f"ORDERBOOK_RECORDER_ERROR {type(e).__name__}: {e}")
         time.sleep(args.sleep)
