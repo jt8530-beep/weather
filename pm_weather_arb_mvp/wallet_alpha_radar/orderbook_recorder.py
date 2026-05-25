@@ -8,9 +8,13 @@ The purpose is to build our own historical order book snapshots for future
 T+60s/T+300s delayed follow backtesting. Without this database, copy-trading
 backtests are mostly fantasy.
 
-If a market watchlist is provided, the recorder prioritizes active markets that
-match the watchlist by market_id / condition_id / market_slug. It then fills the
-remaining slots with high-volume active markets.
+Priority order:
+1. Markets/tokens recently touched by watched wallets in wallet_live_trades.sqlite.
+2. Market watchlist ids from wallet_alpha_radar.
+3. High-volume active markets as filler.
+
+This matters because wallet-follow backtests need order book snapshots for the
+same markets where watched wallets actually traded.
 """
 
 from __future__ import annotations
@@ -47,6 +51,36 @@ def read_candidate_markets(path: Path, top_markets: int) -> Set[str]:
     return set(markets)
 
 
+def read_recent_live_trade_keys(db_path: Optional[Path], lookback_sec: int, max_keys: int) -> Set[str]:
+    """Read recent market keys from wallet_live_trades.sqlite.
+
+    market_key may be market_id, condition_id, slug, or sometimes token id,
+    depending on public trade API shape. market_keys() below includes token ids
+    so token-style keys can still match active Gamma markets.
+    """
+    if not db_path or not db_path.exists():
+        return set()
+    min_ts = int((time.time() - lookback_sec) * 1000)
+    try:
+        con = sqlite3.connect(db_path)
+        rows = con.execute(
+            """
+            SELECT market_key, count(*) AS c
+            FROM wallet_live_trades
+            WHERE seen_ts_ms >= ? AND market_key IS NOT NULL AND market_key != ''
+            GROUP BY market_key
+            ORDER BY c DESC
+            LIMIT ?
+            """,
+            (min_ts, max_keys),
+        ).fetchall()
+        con.close()
+    except Exception as e:
+        print(f"ORDERBOOK_RECORDER_LIVE_KEYS_ERROR {type(e).__name__}: {e}")
+        return set()
+    return {str(r[0]).strip().lower() for r in rows if r and r[0]}
+
+
 def discover_active_markets(limit: int, pages: int, order: str) -> list:
     gamma = GammaClient(Config())
     events = []
@@ -69,21 +103,27 @@ def discover_active_markets(limit: int, pages: int, order: str) -> list:
 
 def market_keys(m) -> Set[str]:
     vals = [m.market_id, m.condition_id, m.market_slug, m.event_slug]
+    if getattr(m, "yes_token", None):
+        vals.append(m.yes_token.token_id)
+    if getattr(m, "no_token", None):
+        vals.append(m.no_token.token_id)
     return {str(x).strip().lower() for x in vals if x}
 
 
-def prioritize_markets(markets: list, watch_ids: Set[str], top_markets: int) -> tuple[list, int]:
-    if not watch_ids:
-        return markets[:top_markets], 0
+def prioritize_markets(markets: list, live_ids: Set[str], watch_ids: Set[str], top_markets: int) -> tuple[list, int, int]:
+    live = []
     watched = []
     other = []
     for m in markets:
-        if market_keys(m) & watch_ids:
+        keys = market_keys(m)
+        if keys & live_ids:
+            live.append(m)
+        elif keys & watch_ids:
             watched.append(m)
         else:
             other.append(m)
-    selected = (watched + other)[:top_markets]
-    return selected, len(watched)
+    selected = (live + watched + other)[:top_markets]
+    return selected, len(live), len(watched)
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -124,12 +164,23 @@ def best_values(book: Optional[OrderBook]) -> tuple[Optional[float], Optional[fl
     return bid_f, ask_f, bid_size, ask_size, spread
 
 
-def record_once(db_path: Path, top_markets: int, pages: int, limit: int, order: str, market_watchlist: Optional[Path] = None) -> int:
+def record_once(
+    db_path: Path,
+    top_markets: int,
+    pages: int,
+    limit: int,
+    order: str,
+    market_watchlist: Optional[Path] = None,
+    live_trades_db: Optional[Path] = None,
+    live_lookback_sec: int = 3600,
+    live_max_keys: int = 2000,
+) -> int:
     load_dotenv()
     watch_ids = read_candidate_markets(market_watchlist, top_markets * 5) if market_watchlist else set()
+    live_ids = read_recent_live_trade_keys(live_trades_db, live_lookback_sec, live_max_keys) if live_trades_db else set()
     markets_all = discover_active_markets(limit=limit, pages=pages, order=order)
     markets_all = [m for m in markets_all if m.yes_token and m.no_token]
-    markets, watched_available = prioritize_markets(markets_all, watch_ids, top_markets)
+    markets, live_available, watched_available = prioritize_markets(markets_all, live_ids, watch_ids, top_markets)
     token_ids = []
     for m in markets:
         token_ids.append(m.yes_token.token_id)
@@ -173,7 +224,8 @@ def record_once(db_path: Path, top_markets: int, pages: int, limit: int, order: 
         conn.close()
     print(
         f"ORDERBOOK_RECORDER_SUMMARY ts_ms={ts_ms} markets={len(markets)} tokens={len(token_ids)} "
-        f"books={len(books)} rows={len(rows)} watched_ids={len(watch_ids)} watched_available={watched_available} db={db_path}"
+        f"books={len(books)} rows={len(rows)} live_ids={len(live_ids)} live_available={live_available} "
+        f"watched_ids={len(watch_ids)} watched_available={watched_available} db={db_path}"
     )
     return len(rows)
 
@@ -182,6 +234,9 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--candidates", default="paper_logs/wallet_alpha/candidate_wallets.csv", help="reserved legacy alias")
     p.add_argument("--market-watchlist", default="", help="CSV with market_id / condition_id / market_slug columns")
+    p.add_argument("--live-trades-db", default="", help="wallet_live_trades.sqlite; recent market_key values are prioritized")
+    p.add_argument("--live-lookback-sec", type=int, default=3600)
+    p.add_argument("--live-max-keys", type=int, default=2000)
     p.add_argument("--db", default="paper_logs/wallet_alpha/orderbook_snapshots.sqlite")
     p.add_argument("--top-markets", type=int, default=200)
     p.add_argument("--pages", type=int, default=5)
@@ -192,14 +247,15 @@ def main() -> int:
     args = p.parse_args()
 
     watch_path = Path(args.market_watchlist) if args.market_watchlist else None
+    live_db = Path(args.live_trades_db) if args.live_trades_db else None
 
     if args.once:
-        record_once(Path(args.db), args.top_markets, args.pages, args.limit, args.order, watch_path)
+        record_once(Path(args.db), args.top_markets, args.pages, args.limit, args.order, watch_path, live_db, args.live_lookback_sec, args.live_max_keys)
         return 0
 
     while True:
         try:
-            record_once(Path(args.db), args.top_markets, args.pages, args.limit, args.order, watch_path)
+            record_once(Path(args.db), args.top_markets, args.pages, args.limit, args.order, watch_path, live_db, args.live_lookback_sec, args.live_max_keys)
         except Exception as e:
             print(f"ORDERBOOK_RECORDER_ERROR {type(e).__name__}: {e}")
         time.sleep(args.sleep)
